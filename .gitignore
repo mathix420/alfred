@@ -1,0 +1,15 @@
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+coverage/
+
+.env
+.env.local
+.env.*.local
+
+.DS_Store
+*.log
+
+# Claude Code (keep shared settings.json + hooks, ignore personal overrides)
+.claude/settings.local.json
