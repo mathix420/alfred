@@ -508,7 +508,8 @@ static void build_focus(void) {
     }
     s.hero =
         flower(s.body, 32, 146, 120,
-               s.completing ? POCKET_GREEN : POCKET_UNCHECKED, s.completing);
+               s.completing ? category_color(task->category) : POCKET_UNCHECKED,
+               s.completing);
     s.title = label(s.body, 24, 297, 320, task->title, &inter_34, POCKET_TEXT);
     lv_obj_set_style_text_letter_space(s.title, -1, 0);
     lv_obj_set_style_text_line_space(s.title, -3, 0);
@@ -529,7 +530,8 @@ static void build_focus(void) {
     }
   }
   if (s.completing)
-    set_hint(s.acknowledged ? "Nice." : "Saving...", POCKET_GREEN, false);
+    set_hint(s.acknowledged ? "Nice." : "Saving...",
+             task ? category_color(task->category) : POCKET_SECONDARY, false);
   else if (s.note[0]) {
     set_hint(s.note, 0xE8927C, false);
     lv_label_set_long_mode(s.hint, LV_LABEL_LONG_SCROLL_CIRCULAR);
@@ -576,14 +578,15 @@ static void build_today(void) {
         lv_obj_set_style_bg_opa(row, 255, 0);
         lv_obj_set_style_radius(row, 14, 0);
       }
-      flower(row, 10, 9, 38, task->completed ? POCKET_GREEN : POCKET_UNCHECKED,
+      flower(row, 10, 9, 38,
+             task->completed ? category_color(task->category) : POCKET_UNCHECKED,
              task->completed);
       lv_obj_t *l = label(row, 60, 6, active ? 220 : 253, task->title,
                           &inter_20, POCKET_TEXT);
       lv_obj_set_height(l, 50);
       lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
       if (active)
-        label(row, 283, 22, 36, "now", &inter_14, POCKET_GREEN);
+        label(row, 283, 22, 36, "now", &inter_14, category_color(task->category));
       lv_obj_add_event_cb(row, row_clicked, LV_EVENT_SHORT_CLICKED,
                           (void *)(intptr_t)i);
       y += 62;

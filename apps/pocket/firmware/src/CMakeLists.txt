@@ -1,5 +1,5 @@
 # =============================================================================
-# Alfred companion — "main" component registration
+# Alfred pocket — "main" component registration
 # =============================================================================
 #
 # Registers every firmware translation unit as the IDF `main` component.
@@ -9,9 +9,9 @@
 #   .       app entry / glue        (main.c, app_*.c)
 #   board/  hardware bring-up       (display, touch, audio codec, IMU, RTC, PMIC,
 #                                     SD) — BOARD_VERSION selects V1 vs V2 drivers
-#   ui/     LVGL screens + theme    (ambient face, listening/thinking/speaking)
-#   net/    Wi-Fi, WebSocket client, protocol codec (mirrors src/protocol.ts)
-#   audio/  I2S record-on-PTT + TTS playback
+#   ui/     LVGL focus, task list, memo, recording and delivery confirmation
+#   net/    WebSocket client and protocol codec (mirrors pocket server controls)
+#   audio/  ES8311 codec and I2S microphone capture
 #
 # We glob the .c files so adding a source in any of these folders doesn't require
 # editing this file. (CMake doesn't re-glob automatically; re-run a clean build —
@@ -36,10 +36,10 @@ idf_component_register(
     nvs_flash     # Wi-Fi creds, device id, pairing token
     esp_event     # wifi/ip event loop
     esp-tls       # wss:// to the bridge
-    json          # cJSON — control-plane frame codec (mirrors protocol.ts)
+    json          # cJSON — control-plane frame codec
     driver        # i2c / i2s / gpio (codec, touch, IMU, RTC, PMIC, buttons)
     esp_driver_sdmmc # SDMMC host for the microSD slot (board_sdcard_init)
-    fatfs         # microSD: FAT mount (esp_vfs_fat_sdmmc_mount), assets + capture queue
+    fatfs         # microSD: FAT mount for setup/setup.txt
     esp_lcd       # AMOLED panel IO/ops (board_display_init, ui flush)
 )
 

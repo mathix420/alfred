@@ -1,155 +1,89 @@
-# companion firmware
+# Pocket firmware
 
-Firmware for the Alfred **pocket companion** — a battery-powered, push-to-talk
-hardware surface running on a **Waveshare ESP32-S3-Touch-AMOLED-1.8**.
-
-The current firmware uses the [pocket backend](../../pocket/README.md) and protocol 2.
-The V1 hardware uses SH8601 display, FT3168 touch, ES8311 audio and AXP2101 power.
-It renders the interface locally with LVGL; the backend supplies tasks and assistant replies.
+Native LVGL app for the **Waveshare ESP32-S3-Touch-AMOLED-1.8**, with a
+368 × 448 AMOLED touchscreen and two physical buttons. Tasks come from the
+[pocket backend](../README.md); recorded voice messages go to Hermes through
+Matrix. The device does not transcribe, display replies, or play spoken replies.
 
 ## Interface
 
-- Tap the focus task to complete it. The live bridge acknowledges the saved change
-  before the green flower/check animation reveals the next task.
+- Tap the focus task to complete it. The backend acknowledges the saved change
+  before the flower/check animation reveals the next task. Completed task
+  flowers keep their category color in Focus and Today.
 - Swipe up from Focus for Today; swipe down for Memo.
 - Scroll within Today or Memo. Tap its title/handle to return, or reverse the
   opening gesture from the header. Content swipes return only when starting at
   the appropriate boundary: Today at the top, Memo at the bottom.
-- BOOT: hold to record, release to send. PWR short press: Today/back.
-- The on-screen Hold to talk footer appears only on Focus, including All clear.
-  Voice screens show their own contextual controls.
+- Hold **BOOT** or the Focus screen's **Hold to talk** footer to record; release
+  to send. Recording is limited to 30 seconds.
+- **Sending** remains visible while delivery is pending. After Matrix acknowledges
+  the message, a green checked flower and **Sent!** appear for one second before
+  returning to Focus. A failed send does not show the success confirmation.
+- **PWR** short press opens Today from Focus and returns from other pages.
 
-## Protocol
+The task, flower, fonts, and animations render locally. No microSD artwork is
+required. Without configuration, the device shows a clearly labeled local demo.
 
-A WebSocket carries JSON controls and mono PCM16 audio. The device sends
-`hello` with protocol 2, `complete_task`, `refresh`, `ptt_down`, binary 16 kHz
-recording chunks, `ptt_up`, and `cancel`. The backend sends `hello`, `focus`,
-`task_completed`, `state`, `transcript`, `reply`, `tts_start`, binary speaker
-audio, `tts_end`, and `error`.
+## Build and flash
 
-The implementation lives in `src/net/protocol.c` and `apps/pocket/src/server.ts`.
-The pocket wire tests compile the actual C parser against real backend frames.
-Matrix credentials are never stored on the device; use its scoped device token
-and `wss://` for a remote backend.
-
-## Board revisions — V1 vs V2
-
-Waveshare ships two revisions of this board that differ in **two drivers**:
-
-| Peripheral | V1     | V2     |
-| ---------- | ------ | ------ |
-| AMOLED     | SH8601 | CO5300 |
-| Touch      | FT3168 | CST816 |
-
-Everything else (ES8311 audio codec, QMI8658 IMU, PCF85063 RTC, AXP2101 PMIC,
-microSD) is common to both. **Identify your board before flashing.**
-
-Selection is a compile-time switch, `BOARD_VERSION`, defined in
-`platformio.ini` via a build flag:
-
-```ini
-; -- in the [env] you build --
-build_flags =
-  -D BOARD_VERSION=1   ; SH8601 + FT3168
-; build_flags =
-;   -D BOARD_VERSION=2   ; CO5300 + CST816
-```
-
-The display and touch drivers `#if BOARD_VERSION == 1 / == 2` on this macro and
-pull in the matching chip driver; no other code is version-aware. Pick the
-right value and the correct drivers compile in. There is no runtime probe —
-flashing a V2 image to a V1 board (or vice versa) yields a blank panel or a dead
-touch layer.
-
-## Prerequisites
-
-Install on the _workstation_ that drives the board (not needed in this repo's
-container):
-
-- **[PlatformIO](https://platformio.org/)** — `pip install platformio`, or the
-  PlatformIO IDE / VS Code extension. PlatformIO downloads the ESP-IDF
-  toolchain and the Xtensa cross-compiler for you on first build.
-- A **USB-C** cable and the board. The ESP32-S3 enumerates as a serial port
-  over USB; on Linux make sure your user is in the `dialout` group.
-- ESP-IDF version is pinned by the `platform = espressif32` version in
-  `platformio.ini`; let PlatformIO manage it rather than installing IDF
-  globally.
-
-## Build & flash
-
-All commands run from this `firmware/` directory.
+Install [PlatformIO](https://platformio.org/) on the workstation connected to the
+device. From this directory:
 
 ```sh
-pio run                      # compile (default env)
-pio run -t upload            # compile + flash over USB-C
-pio device monitor           # open the serial console (esp_log output)
-pio run -t upload -t monitor # flash then immediately monitor
-pio run -t clean             # wipe build artifacts
+pio run -e companion_v1
+pio run -e companion_v1 -t upload --upload-port /dev/ttyACM0
 ```
 
-If `pio` can't find the board, list ports with `pio device list` and pass it
-explicitly: `pio run -t upload --upload-port /dev/ttyACM0`. To force the chip
-into the ROM bootloader, hold **BOOT**, tap **RST/PWR**, release **BOOT**.
+`companion_v1` is the default and matches the tested V1 board: SH8601 display,
+FT3168 touch, ES8311 microphone codec, and AXP2101 power management. The
+`companion` environment selects the V2 CO5300/CST816 drivers; use the environment
+matching your physical hardware. Logs use 115200 baud.
 
-The serial monitor runs at **115200** baud (set by `monitor_speed` in
-`platformio.ini`). Logs use ESP-IDF's `esp_log`; raise verbosity with the
-`CONFIG_LOG_DEFAULT_LEVEL` sdkconfig option or a per-tag
-`esp_log_level_set(TAG, ESP_LOG_DEBUG)`.
+## Wi-Fi and backend configuration
 
-## Configuration — WiFi & bridge URL
+The firmware first reads existing settings from the `alfred` NVS namespace.
+When those settings are incomplete, it reads `setup/setup.txt` from a FAT microSD
+card. Add these literal `KEY=value` lines, with your actual values, to the card:
 
-Credentials are **not** compiled in. The device is provisioned at first run and
-the settings persist in **NVS** (non-volatile storage), so they survive reboots
-and OTA but not a full flash erase.
-
-1. **First-run provisioning over BLE.** With no stored credentials the device
-   advertises a BLE GATT service. A companion app (or `nRF Connect` for manual
-   bring-up) writes the WiFi SSID/passphrase and the **bridge WebSocket URL**
-   (e.g. `ws://192.168.1.10:9191` or `wss://…`), plus the `deviceId` used in the
-   `hello` frame. BLE is used **only** for provisioning and pairing — it is not
-   a data path.
-2. The values are committed to the `alfred` NVS namespace and the device
-   reboots into normal operation: connect WiFi → open the WebSocket → send
-   `hello{deviceId, protocol, firmware}` → await `welcome`.
-3. **Re-provisioning.** Hold **BOOT** during power-on (or trigger the settings
-   screen, Tier 1) to clear the WiFi/bridge keys from NVS and re-advertise.
-
-> For bench bring-up before BLE provisioning exists you may temporarily seed NVS
-> from build flags — see the `// TODO(hw):` markers in the provisioning module.
-> Never commit real credentials.
-
-NVS keys (namespace `alfred`):
-
-| Key          | Meaning                                   |
-| ------------ | ----------------------------------------- |
-| `wifi_ssid`  | WiFi SSID                                 |
-| `wifi_pass`  | WiFi passphrase                           |
-| `bridge_url` | bridge WebSocket URL (`ws://` / `wss://`) |
-| `device_id`  | stable device identifier sent in `hello`  |
-
-## Assets (microSD)
-
-The UI is a **baked static backplate + light foreground animation**. The art is
-**not** compiled into the firmware and **not** committed to this repo — it lives
-on the **microSD card** and is loaded at runtime via LVGL's filesystem driver.
-The on-card layout, file list, palette and authoring pipeline are documented in
-**[`assets/README.md`](assets/README.md)**. Provision a card per that doc before
-expecting anything but a black screen.
-
-## Layout
-
-```
-firmware/
-  platformio.ini      # build config, board, BOARD_VERSION flag (owned elsewhere)
-  src/                # ESP-IDF C sources: drivers, WS client, LVGL UI, audio (owned elsewhere)
-  assets/             # microSD asset spec + pipeline (see assets/README.md)
-  README.md           # this file
+```text
+SSID=your-network
+PASSWORD=your-network-password
+WS_URI=wss://pocket.example.com/ws
+DEVICE_ID=alfred-pocket
+DEVICE_TOKEN=the-same-value-as-ALFRED_DEVICE_TOKEN
+TIMEZONE=CET-1CEST,M3.5.0,M10.5.0/3
 ```
 
-## See also
+`TIMEZONE` is an optional POSIX timezone string. If `DEVICE_ID` is omitted, the
+firmware derives a stable identifier from the device MAC. The token authenticates
+the WebSocket upgrade. Matrix credentials stay on the server.
 
-- [`../SCOPE.md`](../SCOPE.md) — product scope, hardware table, locked decisions,
-  full visual direction.
-- [`../src/protocol.ts`](../src/protocol.ts) — the canonical wire protocol the C
-  side mirrors.
-- [`assets/README.md`](assets/README.md) — the microSD asset pipeline.
+The SD settings are read at boot and are not written back to NVS. Existing NVS
+settings take precedence. BLE provisioning is not implemented.
+
+| NVS key | Meaning |
+| --- | --- |
+| `wifi_ssid` | Wi-Fi SSID |
+| `wifi_pass` | Wi-Fi password |
+| `ws_uri` | Backend WebSocket URL including `/ws` |
+| `device_id` | Stable device identifier |
+| `device_token` | Shared backend device token |
+
+## Protocol and source
+
+Protocol 2 uses WebSocket JSON controls and outbound 16 kHz mono PCM16 audio.
+The device sends `hello`, `complete_task`, `refresh`, `ptt_down`, binary recording
+chunks, `ptt_up`, and `cancel`. The backend supplies `hello`, `focus`,
+`task_completed`, `state`, and `error` messages. The voice sequence is
+`listening` → `thinking` (displayed as Sending) → `sent` → `idle`.
+
+The C decoder retains legacy message definitions for compatibility, but the app
+has no transcript, reply, or TTS callbacks. Optional backend `voice_job` updates
+are ignored by the device.
+
+- [`src/ui/ui.c`](src/ui/ui.c): screens, gestures, and animation.
+- [`src/net/protocol.c`](src/net/protocol.c): protocol decoder.
+- [`src/main.c`](src/main.c): configuration, microphone capture, and app events.
+- [`../src/server.ts`](../src/server.ts): backend wire contract.
+
+Backend wire tests compile the actual C parser against server-generated frames.

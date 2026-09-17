@@ -6,9 +6,9 @@
 //
 // Owns the single WebSocket carrying both planes (see protocol.h):
 //   - inbound TEXT frames → parsed via protocol.c → dispatched to the
-//     ws_client_callbacks_t the app registers (UI + audio control).
-//   - inbound BINARY frames → handed to the audio callback for playback
-//     (TTS PCM between tts_begin/tts_end).
+//     ws_client_callbacks_t the app registers (focus and recording state).
+//   - inbound BINARY frames → optional legacy audio callback; the one-way
+//     pocket app leaves it unset and ignores these frames.
 //   - outbound: hello on open, then ptt_down/ptt_up/telemetry/ping and the mic
 //     binary frames (ws_client_send_audio) while PTT is held.
 //

@@ -7,9 +7,9 @@
 // Two planes share one WebSocket:
 //   - control plane: JSON text frames (encoded/parsed here via cJSON).
 //   - audio plane:   binary frames. Mic audio (device->bridge) flows between a
-//     ptt_down/ptt_up pair; TTS audio (bridge->device) flows between a
-//     tts_begin/tts_end pair. Binary frames are NOT parsed here — ws_client.c
-//     hands them straight to audio.c.
+//     ptt_down/ptt_up pair. The app does not register inbound audio callbacks.
+//     Legacy reply/TTS definitions remain decodable for wire compatibility;
+//     they do not produce text or speaker output in the pocket app.
 //
 // Field names are kept byte-identical to the TypeScript so the two ends stay in
 // lockstep. Bump ALFRED_PROTOCOL_VERSION on any wire change (and bump it in the
@@ -31,7 +31,8 @@ extern "C" {
 // Shared enums / value objects
 // -----------------------------------------------------------------------------
 
-// Mirror of DeviceState = "idle" | "listening" | "thinking" | "speaking".
+// Current states: idle, listening, thinking (Sending), sent.
+// Speaking is a retained legacy value ignored by the one-way pocket UI.
 typedef enum {
   ALFRED_STATE_IDLE = 0,
   ALFRED_STATE_LISTENING,
@@ -216,7 +217,7 @@ typedef struct {
 // String helpers (mirror the TS literal unions)
 // -----------------------------------------------------------------------------
 
-// "idle" | "listening" | "thinking" | "speaking"; never NULL.
+// Known current/legacy state name, including "sent"; never NULL.
 const char *alfred_device_state_str(alfred_device_state_t state);
 // Returns true and fills *out on a known literal; false otherwise.
 bool alfred_device_state_parse(const char *s, alfred_device_state_t *out);

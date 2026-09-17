@@ -917,15 +917,14 @@
  *  https://docs.lvgl.io/master/main-modules/fs.html#lv-fs-identifier-letters . */
 #define LV_FS_DEFAULT_DRIVER_LETTER '\0'
 
-/** API for fopen, fread, etc. — ALFRED: enabled, drive "S:" mapped onto the
- * microSD FAT mount (/sdcard) created by board_sdcard_init(). LVGL loads the
- * baked .bin study art via "S:/alfred/..." paths (assets/README.md). Keep
- * LV_FS_STDIO_PATH in sync with BOARD_SD_MOUNT_POINT in board.c. */
+/** Optional stdio access to the microSD FAT mount (/sdcard). The native pocket
+ * UI draws its own shapes and uses compiled Inter fonts; it requires no files.
+ * Keep LV_FS_STDIO_PATH in sync with BOARD_SD_MOUNT_POINT in board.c. */
 #define LV_USE_FS_STDIO 1
 #if LV_USE_FS_STDIO
-    #define LV_FS_STDIO_LETTER 'S'      /**< drive letter used in "S:/alfred/..." paths */
+    #define LV_FS_STDIO_LETTER 'S'      /**< Optional LVGL filesystem drive. */
     #define LV_FS_STDIO_PATH "/sdcard"  /**< matches BOARD_SD_MOUNT_POINT (board.c) */
-    #define LV_FS_STDIO_CACHE_SIZE 4096 /**< cache reads — big help for SD-backed image decode */
+    #define LV_FS_STDIO_CACHE_SIZE 4096 /**< Optional filesystem read cache. */
 #endif
 
 /** API for open, read, etc. */
