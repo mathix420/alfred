@@ -62,6 +62,30 @@ Flow of a request:
 `PROVIDERS` (registry.ts) and a `case` to the switch (providers.ts). Nothing
 else in the codebase distinguishes providers — keep it that way.
 
+### Memory ("second brain")
+
+`@alfred/core` is also the only place that knows about the **persistence/memory
+backend**, behind the same lazy-resolver shape as models. Memory lives in
+`src/memory/` (exported as `@alfred/core/memory`):
+
+- A store is addressed by a **`"<backend>/<database>"`** id; embeddings reuse the
+  **`"<provider>/<model>"`** grammar. `src/memory/registry.ts` is the pure,
+  dependency-free, unit-tested piece (the `parseModelId` analogue).
+- `src/memory/providers.ts` — `resolveMemoryStore()` switches on the backend and
+  **lazily `import()`s** `src/memory/neo4j.ts`, which is the **only** file that
+  names `neo4j-driver`. An app that never uses memory never loads the driver
+  (verify: `grep -rn "neo4j-driver" packages/core/src` hits only `neo4j.ts`).
+- `src/memory/embedder.ts` — `resolveEmbedder()` is the embedding analogue of
+  `resolveLanguageModel`; the declared `dimensions` is asserted against every
+  vector so a model/index mismatch fails loudly.
+- The data model is a **temporal knowledge graph**: `Message`/`Thread` (verbatim
+  conversation), `Entity` (deduplicated things), `Fact` (reified, bi-temporal
+  observations with embeddings). `recall()` is GraphRAG — vector seed → graph
+  expansion. Facts are **invalidated, never deleted** (`expiredAt`/`invalidAt`).
+- Neo4j runs in Docker (`docker-compose.yml`, bound to loopback). Connect via
+  **`bolt://` only — never `neo4j://`** (the routing scheme hangs under Bun).
+  Data is backed up offline by `scripts/neo4j-backup.sh`.
+
 **Adding a surface**: create `apps/<name>/` as its own workspace
 (`"name": "@alfred/<name>"`), with a `tsconfig.json` extending
 `../../tsconfig.base.json`, depending on `@alfred/core`. Define `dev`/`build`
@@ -78,7 +102,9 @@ to I/O, transport, and presentation — assistant behaviour belongs in core.
   also formats JSON and **reorders object keys** (e.g. `package.json`
   dependencies) — expect that. Run `bun run format` before committing.
 - **Provider credentials** live in `.env` (see `.env.example`):
-  `ANTHROPIC_API_KEY`, `MISTRAL_API_KEY`, `ALFRED_LOCAL_BASE_URL`.
+  `ANTHROPIC_API_KEY`, `MISTRAL_API_KEY`, `ALFRED_LOCAL_BASE_URL`. Memory adds
+  `NEO4J_AUTH` (Docker), `ALFRED_NEO4J_*` (connection), and `ALFRED_EMBEDDING_*`
+  (model + dimensions for the vector index).
 - **`bun.lock` is committed** — keep it in sync when changing dependencies.
 
 ## Git hooks via Claude Code

@@ -1,0 +1,85 @@
+# =============================================================================
+# Alfred companion — ESP-IDF default sdkconfig
+# =============================================================================
+#
+# These defaults seed the generated `sdkconfig` on first build. They are tuned
+# for the Waveshare ESP32-S3-Touch-AMOLED-1.8 (ESP32-S3R8 — 16MB flash, 8MB
+# OCTAL PSRAM). Edit here (committed) rather than the generated `sdkconfig`
+# (gitignored), then delete `sdkconfig` to regenerate.
+#
+# TODO(hw): values marked TODO depend on the exact module and should be checked
+# against Waveshare's ESP-IDF demo sdkconfig once a board is in hand.
+# =============================================================================
+
+# --- Target ------------------------------------------------------------------
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- Flash: 16MB NOR, QIO @ 80MHz -------------------------------------------
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+# Use our custom 16MB OTA + FAT layout (partitions.csv).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# --- PSRAM: 8MB OCTAL @ 80MHz ------------------------------------------------
+# The S3R8 carries octal-SPI PSRAM; required for LVGL framebuffers, audio ring
+# buffers and the TLS/WebSocket stack. Without OCTAL mode the device only sees
+# ~2MB or fails to init RAM entirely.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+# Let large heap allocations spill into PSRAM automatically.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# TODO(hw): some S3R8 batches need the flash/PSRAM 120MHz workaround. Leave 80M
+# unless Waveshare's demo enables CONFIG_SPIRAM_SPEED_120M (+ the experimental
+# 120MHz feature flags).
+
+# --- CPU ---------------------------------------------------------------------
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# --- FreeRTOS ----------------------------------------------------------------
+# 1000Hz tick: 1ms granularity for the audio/UI timing and LVGL tick.
+CONFIG_FREERTOS_HZ=1000
+# `app_main` runs heavy init (wifi + tls + lvgl + drivers); give it headroom.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# WebSocket/TLS frames are large; bump the system event task too.
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+
+# --- Storage: FATFS on the microSD (TF) card + offline capture queue ---------
+# Long filenames for Aseprite-authored asset names; SDMMC over its own host.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+# TODO(hw): confirm the TF slot wiring — SDMMC (4-bit) vs SPI on this module.
+
+# --- Wi-Fi (2.4GHz only) -----------------------------------------------------
+CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=y
+# WebSocket/TLS buffering benefits from larger RX/TX windows.
+CONFIG_LWIP_TCP_WND_DEFAULT=16384
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
+
+# --- BLE: first-run Wi-Fi provisioning + pairing only ------------------------
+# We need BLE (not classic BT) for the provisioning GATT service. NimBLE is the
+# lighter host and is the IDF default for provisioning.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_BLE_ENABLED=y
+# Classic BT is unused on the S3 (BLE-only radio) — keep it off.
+CONFIG_BT_CONTROLLER_ONLY=n
+
+# --- TLS (wss:// to the bridge) ----------------------------------------------
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+# TODO(hw): pin the bridge CA / use a PSK once pairing/auth is decided (SCOPE §7).
+
+# --- NVS: Wi-Fi creds, device id, pairing token ------------------------------
+CONFIG_NVS_ENCRYPTION=n
+# TODO(security): enable NVS encryption + flash encryption before shipping.
+
+# --- Logging -----------------------------------------------------------------
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
+
+# --- Compiler ----------------------------------------------------------------
+CONFIG_COMPILER_OPTIMIZATION_PERF=y

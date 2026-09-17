@@ -1,0 +1,2 @@
+# Pinned nio uses vodozemac wheels for E2EE; installation never connects accounts.
+matrix-nio[e2e]==0.26.0

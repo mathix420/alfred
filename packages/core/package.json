@@ -6,15 +6,18 @@
   "module": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",
+    "./memory": "./src/memory/index.ts",
     "./models": "./src/models/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "../../scripts/tsc7 --noEmit --checkers 4"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "latest",
     "@ai-sdk/mistral": "latest",
+    "@ai-sdk/openai": "latest",
     "@ai-sdk/openai-compatible": "latest",
-    "ai": "latest"
+    "ai": "latest",
+    "neo4j-driver": "latest"
   }
 }

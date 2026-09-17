@@ -3,13 +3,35 @@ dist/
 build/
 *.tsbuildinfo
 coverage/
+apps/pocket/.data/
 
 .env
 .env.local
 .env.*.local
+.env.*
+!.env.example
+
+# Local design canvas, inspiration screenshots and device artwork exports
+/design.pen
+/image.png
+/alfred.png
+/alfred2.png
+/pixellab-*.png
+/study_bg.bin
+/study_bg_centered.png
+
+# Private runtime and Python caches
+.data/
+__pycache__/
+*.pyc
+.venv/
+.ci/
 
 .DS_Store
 *.log
+
+# Neo4j offline dumps (precious data — push these off-box, don't commit them)
+scripts/*.dump
 
 # Claude Code (keep shared settings.json + hooks, ignore personal overrides)
 .claude/settings.local.json

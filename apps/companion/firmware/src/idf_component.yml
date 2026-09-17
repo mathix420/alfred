@@ -1,0 +1,19 @@
+# =============================================================================
+# Alfred companion — ESP-IDF managed-component dependencies (main component)
+# =============================================================================
+#
+# Fetched from the ESP Component Registry (https://components.espressif.com) by
+# the IDF component manager during the build. Declaring a dependency here makes
+# its public headers available to this component automatically — no extra entry
+# in src/CMakeLists.txt REQUIRES is needed.
+#
+#   esp_websocket_client — wss:// control-plane link to the bridge (net/ws_client.c).
+#     Lives outside esp-idf core since 5.x, so it must be pulled in as a managed
+#     component rather than listed in REQUIRES.
+# =============================================================================
+
+dependencies:
+  espressif/esp_websocket_client: "^1.2.0"
+  # V1 AMOLED panel driver (SH8601) over QSPI, used by board_display_init().
+  # esp_lcd_co5300 is the V2 analogue — add it when the V2 path is implemented.
+  espressif/esp_lcd_sh8601: "^1.0.0"

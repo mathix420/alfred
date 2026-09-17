@@ -1,0 +1,185 @@
+name: Docker
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: Test and build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CJSON_SOURCE_DIR: ${{ github.workspace }}/.ci/cjson
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out cJSON for firmware wire tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3 # v1.7.19
+          path: .ci/cjson
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        # Each workspace uses scripts/tsc7 with --checkers 4.
+        run: bun run typecheck
+
+      - name: Run tests, including Bun and firmware wire contract
+        run: |
+          test -f "$CJSON_SOURCE_DIR/cJSON.c"
+          command -v cc
+          bun test
+
+      - name: Build browser assets
+        run: bun run build
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build image for testing
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: alfred-pocket:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Check container, browser assets, WebSocket, and persistence
+        shell: bash
+        run: |
+          volume=$(docker volume create)
+          container_id=$(docker run --detach --init \
+            --volume "$volume:/data" \
+            --publish 127.0.0.1::9191 alfred-pocket:ci)
+          trap 'docker logs "$container_id"; docker rm --force "$container_id" >/dev/null; docker volume rm "$volume" >/dev/null' EXIT
+          port=$(docker port "$container_id" 9191/tcp | cut -d: -f2)
+          export CI_POCKET_URL="http://127.0.0.1:$port"
+          curl --fail --silent --show-error \
+            --retry 15 --retry-all-errors --retry-delay 1 --max-time 5 \
+            "$CI_POCKET_URL/api/status"
+          test "$(docker exec "$container_id" id -u)" != 0
+          docker exec "$container_id" /opt/venv/bin/python -c 'import vodozemac; from nio import AsyncClientConfig; assert AsyncClientConfig(encryption_enabled=True).encryption_enabled'
+          docker exec "$container_id" /opt/venv/bin/python -m unittest discover -s apps/pocket/matrix -p 'test_*.py'
+          docker exec "$container_id" ffmpeg -version >/dev/null
+          bun - <<'JS'
+          import assert from "node:assert/strict";
+          const base = process.env.CI_POCKET_URL;
+          const status = await (await fetch(`${base}/api/status`)).json();
+          assert.equal(status.mode, "demo");
+          for (const path of ["/", "/app.js", "/styles.css", "/assets/inter.woff2"]) {
+            const response = await fetch(`${base}${path}`);
+            assert.equal(response.status, 200, path);
+            assert.ok((await response.arrayBuffer()).byteLength > 0, path);
+          }
+          await new Promise((resolve, reject) => {
+            const socket = new WebSocket(`${base.replace("http:", "ws:")}/ws`);
+            const timer = setTimeout(() => { socket.close(); reject(new Error("WebSocket timed out")); }, 5000);
+            socket.onopen = () => socket.send(JSON.stringify({ type: "hello", protocol: 2, deviceId: "ci-container" }));
+            socket.onerror = () => { clearTimeout(timer); reject(new Error("WebSocket failed")); };
+            socket.onmessage = (event) => {
+              const frame = JSON.parse(event.data);
+              if (frame.type === "focus") { clearTimeout(timer); socket.close(); resolve(); }
+            };
+          });
+          const before = await (await fetch(`${base}/api/focus`)).json();
+          assert.ok(before.focusId);
+          const response = await fetch(`${base}/api/tasks/${before.focusId}/complete`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ requestId: "ci-complete" }),
+          });
+          assert.equal(response.status, 200);
+          await Bun.write("/tmp/alfred-ci-completed-id", before.focusId);
+          JS
+          docker restart "$container_id" >/dev/null
+          port=$(docker port "$container_id" 9191/tcp | cut -d: -f2)
+          export CI_POCKET_URL="http://127.0.0.1:$port"
+          curl --fail --silent --show-error \
+            --retry 15 --retry-all-errors --retry-delay 1 --max-time 5 \
+            "$CI_POCKET_URL/api/status"
+          bun - <<'JS'
+          import assert from "node:assert/strict";
+          const completed = await Bun.file("/tmp/alfred-ci-completed-id").text();
+          const snapshot = await (await fetch(`${process.env.CI_POCKET_URL}/api/focus`)).json();
+          assert.equal(snapshot.tasks.find((task) => task.id === completed)?.completed, true);
+          console.log("Container smoke checks passed, including completion after restart.");
+          JS
+
+  publish:
+    name: Publish to GitHub Container Registry
+    needs: check
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) ||
+       startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU for ARM64
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Generate image tags and labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=long
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

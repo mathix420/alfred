@@ -1,0 +1,20 @@
+{
+  "name": "@alfred/companion",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "module": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "bun --watch run src/index.ts",
+    "build": "bun build src/index.ts --target bun --outdir dist",
+    "start": "bun run src/index.ts",
+    "typecheck": "../../scripts/tsc7 --noEmit --checkers 4"
+  },
+  "dependencies": {
+    "@alfred/core": "workspace:*",
+    "ai": "latest"
+  }
+}

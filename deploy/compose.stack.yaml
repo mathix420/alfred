@@ -1,0 +1,44 @@
+# Merge into the existing stack; keep its services and credentials there.
+# docker compose -f /path/to/stack.yaml -f deploy/compose.stack.yaml up -d
+services:
+  alfred:
+    image: ${ALFRED_POCKET_IMAGE:-ghcr.io/mathix420/alfred:latest}
+    restart: unless-stopped
+    init: true
+    depends_on:
+      todomate-mcp:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-Europe/Paris}
+      ALFRED_POCKET_PUBLIC_ORIGIN: ${ALFRED_POCKET_PUBLIC_ORIGIN:-}
+      ALFRED_POCKET_HOST: 0.0.0.0
+      ALFRED_POCKET_PORT: "9191"
+      ALFRED_POCKET_DATA_FILE: /data/tasks.json
+      ALFRED_POCKET_VOICE_DIR: /data/voice
+      ALFRED_POCKET_POLL_MS: ${ALFRED_POCKET_POLL_MS:-60000}
+      ALFRED_DEVICE_TOKEN: ${ALFRED_DEVICE_TOKEN:?Set ALFRED_DEVICE_TOKEN in the stack environment}
+      ALFRED_TODOMATE_API_URL: http://todomate-mcp:8000
+      TODOMATE_MCP_ACCESS_TOKEN: ${TODOMATE_MCP_ACCESS_TOKEN:?Set TODOMATE_MCP_ACCESS_TOKEN in the stack environment}
+      ALFRED_MATRIX_ENABLED: ${ALFRED_MATRIX_ENABLED:-false}
+      ALFRED_MATRIX_HOMESERVER: ${ALFRED_MATRIX_HOMESERVER:-}
+      ALFRED_MATRIX_USER_ID: ${ALFRED_MATRIX_USER_ID:-}
+      ALFRED_MATRIX_ACCESS_TOKEN: ${ALFRED_MATRIX_ACCESS_TOKEN:-}
+      ALFRED_MATRIX_DEVICE_ID: ${ALFRED_MATRIX_DEVICE_ID:-}
+      ALFRED_MATRIX_HERMES_USER_ID: ${ALFRED_MATRIX_HERMES_USER_ID:-}
+      ALFRED_MATRIX_ROOM_ID: ${ALFRED_MATRIX_ROOM_ID:-}
+      ALFRED_MATRIX_PICKLE_KEY: ${ALFRED_MATRIX_PICKLE_KEY:-}
+      ALFRED_MATRIX_TRUSTED_DEVICES: ${ALFRED_MATRIX_TRUSTED_DEVICES:-}
+      ALFRED_MATRIX_REPLY_TIMEOUT_MS: ${ALFRED_MATRIX_REPLY_TIMEOUT_MS:-180000}
+      ALFRED_MATRIX_STORE_DIR: /data/matrix
+      ALFRED_MATRIX_PYTHON: /opt/venv/bin/python
+    ports:
+      - "${ALFRED_POCKET_BIND:-127.0.0.1}:${ALFRED_POCKET_PORT:-9191}:9191"
+    volumes:
+      - alfred_data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  alfred_data:

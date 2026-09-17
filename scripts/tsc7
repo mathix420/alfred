@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Native TypeScript 7; callers explicitly choose their checker count.
+task_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+exec "$task_root/node_modules/.bin/tsgo" "$@"

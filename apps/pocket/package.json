@@ -1,0 +1,12 @@
+{
+  "name": "@alfred/pocket",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch run src/index.ts",
+    "start": "bun run src/index.ts",
+    "build": "bun run src/build.ts",
+    "typecheck": "../../scripts/tsc7 --noEmit --checkers 4"
+  }
+}

@@ -7,17 +7,21 @@
   ],
   "type": "module",
   "scripts": {
-    "dev": "bun run --filter '*' dev",
-    "build": "bun run --filter '*' build",
+    "dev": "bun run --filter @alfred/pocket dev",
+    "build": "bun run --filter @alfred/pocket build",
     "test": "bun test",
     "typecheck": "bun run --filter '*' typecheck",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "format": "oxfmt",
-    "format:check": "oxfmt --check"
+    "format:check": "oxfmt --check",
+    "dev:companion": "bun run --filter @alfred/companion dev",
+    "firmware:build": "pio run -d apps/companion/firmware -e companion_v1",
+    "firmware:flash": "pio run -d apps/companion/firmware -e companion_v1 -t upload"
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@typescript/native-preview": "7.0.0-dev.20260707.2",
     "oxfmt": "latest",
     "oxlint": "latest",
     "typescript": "latest"

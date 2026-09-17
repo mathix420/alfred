@@ -1,0 +1,30 @@
+# Local: docker compose -f compose.pocket.yaml up -d --build
+# Published image: docker compose -f compose.pocket.yaml pull
+# Set ALFRED_POCKET_BIND to your LAN/VPN address for the physical device.
+services:
+  pocket:
+    image: ${ALFRED_POCKET_IMAGE:-ghcr.io/mathix420/alfred:latest}
+    build: .
+    restart: unless-stopped
+    init: true
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      ALFRED_POCKET_HOST: 0.0.0.0
+      ALFRED_POCKET_PORT: 9191
+      ALFRED_POCKET_DATA_FILE: /data/tasks.json
+      ALFRED_POCKET_VOICE_DIR: /data/voice
+      ALFRED_MATRIX_STORE_DIR: /data/matrix
+      ALFRED_MATRIX_PYTHON: /opt/venv/bin/python
+    ports:
+      - "${ALFRED_POCKET_BIND:-127.0.0.1}:${ALFRED_POCKET_PORT:-9191}:9191"
+    volumes:
+      - pocket_data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  pocket_data:

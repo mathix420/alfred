@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#000000" />
+    <title>Alfred · Pocket companion</title>
+    <link rel="icon" href="data:," />
+    <link rel="preload" href="/assets/inter.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <main class="preview">
+      <header class="preview-heading">
+        <span>alfred</span><span id="mode-label">Connecting</span>
+      </header>
+      <div class="device">
+        <section
+          id="screen"
+          class="screen"
+          aria-label="Alfred pocket assistant"
+          tabindex="-1"
+        ></section>
+        <button
+          id="talk-button"
+          class="physical-button talk-button"
+          aria-label="Hold to talk to Hermes"
+          title="Hold to talk · Space"
+        ></button>
+        <button
+          id="action-button"
+          class="physical-button action-button"
+          aria-label="Open today or return to focus"
+          title="Today / back"
+        ></button>
+      </div>
+      <footer class="preview-footer">
+        <p>One thing at a time.</p>
+        <div class="gesture-guide">
+          <span>↑ Today</span><span>↓ Memo</span><span>Hold space to talk</span>
+        </div>
+        <p id="connection-note" class="connection-note" aria-live="polite"></p>
+      </footer>
+    </main>
+    <dialog id="access-dialog" class="access-dialog" aria-labelledby="access-title">
+      <form id="access-form">
+        <h2 id="access-title">Connect to Alfred</h2>
+        <p>Enter this backend's device token.</p>
+        <label for="device-token">Device token</label>
+        <input id="device-token" name="token" type="password" autocomplete="off" required />
+        <p id="access-error" role="status"></p>
+        <button type="submit">Connect</button>
+      </form>
+    </dialog>
+    <div id="announcement" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+  </body>
+</html>

@@ -1,0 +1,36 @@
+# Only application sources and browser assets belong in the build context.
+**
+!Dockerfile
+!.dockerignore
+!apps/
+!apps/pocket/
+!apps/pocket/src/
+!apps/pocket/src/**
+!apps/pocket/web/
+!apps/pocket/web/**
+!apps/pocket/matrix/
+!apps/pocket/matrix/**
+!apps/companion/
+!apps/companion/src/
+!apps/companion/src/stt/
+!apps/companion/src/stt/whisper.ts
+!apps/companion/src/tts/
+!apps/companion/src/tts/piper.ts
+!apps/companion/src/ports.ts
+!apps/companion/src/protocol.ts
+
+# Never include local credentials, Matrix identity, audio, or generated files.
+**/.env
+**/.env.*
+**/.data
+**/node_modules
+**/__pycache__
+**/*.py[cod]
+**/*.db
+**/*.db-*
+**/*.pickle
+**/*.pem
+**/*.key
+**/*.wav
+**/*.ogg
+**/*.mp3

@@ -16,6 +16,11 @@ fi
 
 cd "${CLAUDE_PROJECT_DIR:-.}" || exit 0
 
+# GUI-launched sessions (e.g. the pen.dev app) don't source the shell profile,
+# so bun's install dir may be missing from PATH.
+command -v bun >/dev/null 2>&1 || export PATH="$HOME/.bun/bin:$PATH"
+command -v bun >/dev/null 2>&1 || { echo "Stop hook: bun not found, skipping checks" >&2; exit 0; }
+
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 fail=0
