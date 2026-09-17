@@ -61,13 +61,13 @@ the WebSocket upgrade. Matrix credentials stay on the server.
 The SD settings are read at boot and are not written back to NVS. Existing NVS
 settings take precedence. BLE provisioning is not implemented.
 
-| NVS key | Meaning |
-| --- | --- |
-| `wifi_ssid` | Wi-Fi SSID |
-| `wifi_pass` | Wi-Fi password |
-| `ws_uri` | Backend WebSocket URL including `/ws` |
-| `device_id` | Stable device identifier |
-| `device_token` | Shared backend device token |
+| NVS key        | Meaning                               |
+| -------------- | ------------------------------------- |
+| `wifi_ssid`    | Wi-Fi SSID                            |
+| `wifi_pass`    | Wi-Fi password                        |
+| `ws_uri`       | Backend WebSocket URL including `/ws` |
+| `device_id`    | Stable device identifier              |
+| `device_token` | Shared backend device token           |
 
 ## Protocol and source
 
