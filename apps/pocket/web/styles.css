@@ -222,13 +222,16 @@ section {
   font-weight: 600;
   letter-spacing: -0.2px;
   flex-shrink: 0;
-  color: var(--work);
+  color: var(--category-color);
 }
-.category.health {
-  color: var(--health);
+[data-category="work"] {
+  --category-color: var(--work);
 }
-.category.personal {
-  color: var(--personal);
+[data-category="health"] {
+  --category-color: var(--health);
+}
+[data-category="personal"] {
+  --category-color: var(--personal);
 }
 .category .flower {
   width: 13px;
@@ -318,7 +321,7 @@ section {
   height: 15px;
 }
 .hint.success {
-  color: var(--green);
+  color: var(--category-color);
   font-size: 15px;
   font-weight: 600;
 }
@@ -349,7 +352,7 @@ section {
   animation: waiting 0.9s ease-in-out infinite alternate;
 }
 .celebrating .check-flower {
-  color: var(--green);
+  color: var(--category-color);
   animation: flower-pop 0.42s cubic-bezier(0.2, 0.8, 0.25, 1.3);
 }
 .celebrating .checkmark {
@@ -494,7 +497,7 @@ section {
   border-radius: 50%;
   background: var(--green);
 }
-.transcript {
+.voice-detail {
   margin: 0;
   font-size: 17px;
   line-height: 1.35;
@@ -526,40 +529,8 @@ section {
 .thinking-dots .flower:nth-child(3) {
   --delay: 0.4s;
 }
-.thinking .transcript {
+.thinking .voice-detail {
   color: var(--dim);
-}
-.reply-body {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-  max-height: 315px;
-  overflow: auto;
-  overscroll-behavior: contain;
-  touch-action: pan-y;
-  scrollbar-width: thin;
-  scrollbar-color: #3e3e44 transparent;
-}
-.hermes-label {
-  display: flex;
-  gap: 9px;
-  align-items: center;
-  color: var(--green);
-  font-size: 18px;
-  font-weight: 600;
-  letter-spacing: -0.2px;
-}
-.hermes-label .flower {
-  width: 22px;
-  height: 22px;
-}
-.reply-text {
-  font-size: 28px;
-  line-height: 1.25;
-  letter-spacing: -0.5px;
-  font-weight: 600;
-  margin: 0;
-  overflow-wrap: anywhere;
 }
 .offline-body {
   display: flex;
@@ -682,7 +653,7 @@ section {
   height: 100%;
 }
 .row-check.done {
-  color: var(--green);
+  color: var(--category-color);
 }
 .row-check .row-tick {
   position: absolute;
@@ -719,7 +690,7 @@ section {
   color: var(--dim);
 }
 .now-tag {
-  color: var(--green);
+  color: var(--category-color);
   font-size: 13px;
   font-weight: 600;
 }
@@ -996,4 +967,14 @@ section {
 #access-error {
   color: var(--coral);
   min-height: 16px;
+}
+
+.sent .check-flower {
+  color: var(--green);
+  animation: flower-pop 0.35s ease-out;
+}
+.sent .checkmark {
+  opacity: 1;
+  stroke-dashoffset: 0;
+  transform: none;
 }

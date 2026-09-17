@@ -4,6 +4,8 @@ A native 368 × 448 touch interface, browser preview and small Bun backend for t
 Waveshare ESP32-S3-Touch-AMOLED-1.8 V1. Task data comes directly from the TodoMate
 REST API. Voice goes through a dedicated encrypted Matrix session on your account
 so recordings appear as you in the existing Beeper conversation with Hermes.
+After Matrix confirms delivery, Alfred shows **Sent!** and returns to the task.
+It does not transcribe, synthesize speech, wait for a reply or read incoming chat.
 
 ```text
 ESP32 / browser ── authenticated HTTPS or WSS ── Alfred
@@ -23,7 +25,7 @@ bun run dev
 
 Open http://127.0.0.1:9191. Blank TodoMate and Matrix configuration starts a clearly
 labelled demo. Demo task completion persists in `apps/pocket/.data/tasks.json`.
-The demo conversation is scripted; it does not send microphone audio anywhere.
+The demo recording animation sends no microphone audio anywhere.
 
 Tap the task to complete it, swipe up for Today, or down for Memo. Memo and Today
 scroll. Tap their title or top handle to return. Browser page drags begin outside
@@ -34,8 +36,11 @@ The native device uses BOOT for push-to-talk and PWR short press for Today/back.
 ## Add Alfred to an existing Docker stack
 
 The published image is `ghcr.io/mathix420/alfred:latest` (AMD64 and ARM64).
-Use [deploy/compose.stack.yaml](../../deploy/compose.stack.yaml) as an override for
-a stack with the `todomate-mcp` service:
+For the **Portainer stack editor**, follow the [setup commands](../../deploy/PORTAINER.md).
+Add the service and volume from [deploy/compose.stack.yaml](../../deploy/compose.stack.yaml)
+to your existing stack and load the generated private environment file.
+
+With Docker Compose CLI, the same file works as an override:
 
 ```sh
 docker compose -f /path/to/stack.yaml -f deploy/compose.stack.yaml pull alfred todomate-mcp
@@ -214,12 +219,12 @@ returns the existing job; changed bytes return `409`. Recordings are limited to
 a letter/digit.
 
 The backend encrypts the media attachment and sends an encrypted `m.audio` voice
-event into the configured room. Hermes performs transcription. Replies are accepted
-only from the configured room and verified Hermes device, with a relation to that
-recording. Unrelated chat messages are never routed as the device's answer.
+event into the configured room. Alfred confirms the Matrix send and returns to
+Focus; the conversation continues in Beeper. There is no speech processing or
+incoming-reply forwarding in this server.
 
-Cancelling on the device stops waiting/playback; a recording already queued or sent
-to Matrix remains a message in Beeper. Matrix credentials are still required to
+Cancelling on the device stops recording or waiting for delivery. A recording
+already queued still sends to Matrix; an existing message stays in Beeper. Matrix credentials are still required to
 verify the complete live route; local tests use isolated fake transports and never
 send a message to an external account.
 

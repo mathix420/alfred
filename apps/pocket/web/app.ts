@@ -14,7 +14,7 @@ interface Snapshot {
   mode: "demo" | "live";
   connection: "online" | "offline" | "unconfigured";
 }
-type View = "focus" | "today" | "memo" | "listening" | "thinking" | "speaking";
+type View = "focus" | "today" | "memo" | "listening" | "thinking" | "sent";
 const screen = document.querySelector<HTMLElement>("#screen")!;
 const announcement = document.querySelector<HTMLElement>("#announcement")!;
 const flowerPath =
@@ -48,8 +48,7 @@ let snapshot: Snapshot | null = null;
 let view: View = "focus";
 let socket: WebSocket | null = null;
 let online = false;
-let transcript = "";
-let reply = "";
+let voiceStatus = "";
 let memoId: string | null = null;
 let toast = "";
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
@@ -65,15 +64,10 @@ let audioContext: AudioContext | null = null;
 let captureModuleReady: Promise<void> | null = null;
 let acceptNextSnapshot = false;
 let worklet: AudioWorkletNode | null = null;
-let audioRate = 22050;
-let playbackAt = 0;
-let returnAfterPlayback = false;
 let requestTimeoutMs = 190000;
-const playback = new Set<AudioBufferSourceNode>();
 const deviceId = `browser-${getBrowserId()}`;
 let deviceToken = "";
 let needsToken = false;
-let lastVoiceReplyAt = 0;
 const accessDialog = document.querySelector<HTMLDialogElement>("#access-dialog")!;
 function requestToken(): void {
   const wasWaiting = needsToken;
@@ -157,7 +151,7 @@ function status(): string {
     minute: "2-digit",
     hour12: false,
   });
-  return `<div class="status"><span class="clock-time">${time}</span><div class="indicators">${demo ? '<span class="demo-label">DEMO</span>' : ""}<span class="link-dot ${!connected ? "offline" : demo ? "demo" : ""}" role="img" aria-label="${demo ? "Demo mode" : connected ? "Connected to Hermes" : "Offline"}"></span>${icon("battery", "battery")}</div></div>`;
+  return `<div class="status"><span class="clock-time">${time}</span><div class="indicators">${demo ? '<span class="demo-label">DEMO</span>' : ""}<span class="link-dot ${!connected ? "offline" : demo ? "demo" : ""}" role="img" aria-label="${demo ? "Demo mode" : connected ? "Connected to Alfred" : "Offline"}"></span>${icon("battery", "battery")}</div></div>`;
 }
 function hint(label = "Hold to talk", action = "voice", mic = true): string {
   return `<button class="hint" data-${action} aria-label="${escape(label)}">${mic ? icon("mic") : ""}<span>${escape(label)}</span></button>`;
@@ -176,7 +170,7 @@ function focusView(): string {
     return `<div class="page">${status()}<div class="empty-body"><div class="check-wrap">${flower("check-flower")}<svg class="sleepy-eyes" viewBox="0 0 54 16" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"><path d="M2 5q7 8 14 0M34 5q7 8 14 0"/></svg><span class="sleep-z">z</span><span class="sleep-z small">z</span></div><p>${snapshot.mode === "live" && !snapshot.tasks.length ? "Nothing to focus on." : "Good job, enjoy the calm."}</p></div>${hint()}<button class="grabber" data-today aria-label="Open today"></button></div>`;
   const due = dueLabel(task);
   const phase = completion?.phase ?? "";
-  return `<div class="page ${phase}" data-view="focus">${status()}<button class="focus-body" data-complete="${escape(task.id)}" aria-label="Complete task: ${escape(task.title)}" ${completion ? "disabled" : ""}><span class="category-row">${category(task)}${due ? `<span class="due">${icon("clock")}${escape(due)}</span>` : ""}</span>${check()}<span class="task-title ${task.title.length > 65 ? "long" : ""}">${escape(task.title)}</span></button>${phase === "celebrating" ? '<div class="hint success">Nice.</div>' : phase === "waiting" ? '<div class="hint">Saving…</div>' : hint()}<button class="grabber" data-today aria-label="Open today"></button></div>`;
+  return `<div class="page ${phase}" data-view="focus" data-category="${task.category}">${status()}<button class="focus-body" data-complete="${escape(task.id)}" aria-label="Complete task: ${escape(task.title)}" ${completion ? "disabled" : ""}><span class="category-row">${category(task)}${due ? `<span class="due">${icon("clock")}${escape(due)}</span>` : ""}</span>${check()}<span class="task-title ${task.title.length > 65 ? "long" : ""}">${escape(task.title)}</span></button>${phase === "celebrating" ? '<div class="hint success">Nice.</div>' : phase === "waiting" ? '<div class="hint">Saving…</div>' : hint()}<button class="grabber" data-today aria-label="Open today"></button></div>`;
 }
 function todayView(): string {
   if (!snapshot) return offlineView();
@@ -185,7 +179,7 @@ function todayView(): string {
     .map((group) => {
       const tasks = snapshot!.tasks.filter((t) => t.category === group);
       if (!tasks[0]) return "";
-      return `<div class="task-section">${category(tasks[0])}${tasks.map((task) => `<button class="task-row ${task.id === snapshot?.focusId ? "current" : ""}" data-task="${escape(task.id)}" aria-label="${task.completed ? "Completed: " : "Open memo: "}${escape(task.title)}"><span class="row-check ${task.completed ? "done" : ""}">${flower()}${task.completed ? tick("row-tick") : ""}</span><span class="row-content"><span class="row-label">${escape(task.title)}</span>${task.dueAt && task.id !== snapshot?.focusId ? `<span class="row-due">${icon("clock")}${escape(dueLabel(task, true))}</span>` : ""}</span>${task.id === snapshot?.focusId ? '<span class="now-tag">now</span>' : ""}</button>`).join("")}</div>`;
+      return `<div class="task-section" data-category="${group}">${category(tasks[0])}${tasks.map((task) => `<button class="task-row ${task.id === snapshot?.focusId ? "current" : ""}" data-task="${escape(task.id)}" aria-label="${task.completed ? "Completed: " : "Open memo: "}${escape(task.title)}"><span class="row-check ${task.completed ? "done" : ""}">${flower()}${task.completed ? tick("row-tick") : ""}</span><span class="row-content"><span class="row-label">${escape(task.title)}</span>${task.dueAt && task.id !== snapshot?.focusId ? `<span class="row-due">${icon("clock")}${escape(dueLabel(task, true))}</span>` : ""}</span>${task.id === snapshot?.focusId ? '<span class="now-tag">now</span>' : ""}</button>`).join("")}</div>`;
     })
     .join("")}</div></div>`;
 }
@@ -194,13 +188,13 @@ function memoView(): string {
   return `<div class="page memo-page"><button class="grabber top" data-back aria-label="Return to focus"></button>${status()}<div class="memo-body"><button class="memo-heading" data-back aria-label="Memo, return to focus"><span class="memo-badge">${icon("file")}</span>Memo</button><article class="memo-article scroll-area" data-scroll tabindex="0" aria-label="Task memo">${escape(task?.memo || "No memo for this task yet. Ask Hermes to add one.")}</article></div><div class="memo-fade"></div></div>`;
 }
 function voiceView(): string {
-  if (view === "speaking")
-    return `<div class="page" data-interrupt>${status()}<div class="reply-body" data-scroll><div class="hermes-label">${flower()}Hermes</div><p class="reply-text">${escape(reply || "…")}</p></div>${hint("Tap to interrupt", "cancel", false)}</div>`;
+  if (view === "sent")
+    return `<div class="page sent">${status()}<div class="voice-center">${check()}<h1 class="voice-label">Sent!</h1></div><div class="hint"></div></div>`;
   const listening = view === "listening";
-  return `<div class="page ${listening ? "listening" : "thinking"}">${status()}<div class="voice-center">${listening ? `<div class="waveform">${[26, 58, 88, 44, 30].map((height, i) => `<i style="--bar:${height}px;--delay:${i * -0.14}s"></i>`).join("")}</div>` : `<div class="thinking-dots">${flower()}${flower()}${flower()}</div>`}<h1 class="voice-label">${listening ? '<span class="live-dot"></span>' : ""}${listening ? "Listening" : "Thinking"}</h1><p class="transcript">${escape(transcript || (snapshot?.mode === "demo" ? "Demo conversation" : listening ? "I'm listening." : "One moment…"))}</p></div>${hint(listening ? "Release to send" : "Tap to cancel", listening ? "noop" : "cancel", false)}</div>`;
+  return `<div class="page ${listening ? "listening" : "thinking"}">${status()}<div class="voice-center">${listening ? `<div class="waveform">${[26, 58, 88, 44, 30].map((height, i) => `<i style="--bar:${height}px;--delay:${i * -0.14}s"></i>`).join("")}</div>` : `<div class="thinking-dots">${flower()}${flower()}${flower()}</div>`}<h1 class="voice-label">${listening ? '<span class="live-dot"></span>' : ""}${listening ? "Listening" : "Sending"}</h1><p class="voice-detail">${escape(voiceStatus || (snapshot?.mode === "demo" ? "Demo recording" : listening ? "Hold while you speak." : "Uploading your voice message…"))}</p></div>${hint(listening ? "Release to send" : "Tap to cancel", listening ? "noop" : "cancel", false)}</div>`;
 }
 function offlineView(): string {
-  return `<div class="page">${status()}<div class="offline-body"><div class="check-wrap">${flower("check-flower")}${icon("offline", "offline-icon")}</div><h1 class="task-title">No connection</h1><p class="offline-description">Can't reach Hermes. Alfred will reconnect on its own.</p></div><button class="hint" data-retry>${icon("retry")}Tap to retry</button></div>`;
+  return `<div class="page">${status()}<div class="offline-body"><div class="check-wrap">${flower("check-flower")}${icon("offline", "offline-icon")}</div><h1 class="task-title">No connection</h1><p class="offline-description">Can't reach the server. Alfred will reconnect on its own.</p></div><button class="hint" data-retry>${icon("retry")}Tap to retry</button></div>`;
 }
 function pageMarkup(page: View): string {
   return page === "focus"
@@ -254,7 +248,7 @@ function render(): void {
     screen.append(el);
   }
   document.querySelector("#mode-label")!.textContent =
-    snapshot?.mode === "demo" ? "Interactive demo" : online ? "Connected to Hermes" : "Offline";
+    snapshot?.mode === "demo" ? "Interactive demo" : online ? "Connected to Alfred" : "Offline";
   document.querySelector("#connection-note")!.textContent =
     snapshot?.mode === "demo"
       ? "Demo tasks · cloud credentials are not configured. Tap a task to try the completion animation."
@@ -292,10 +286,7 @@ function connect(): void {
     render();
   };
   ws.onmessage = (event: MessageEvent<string | ArrayBuffer>) => {
-    if (event.data instanceof ArrayBuffer) {
-      playAudio(event.data);
-      return;
-    }
+    if (event.data instanceof ArrayBuffer) return;
     let message: Record<string, unknown>;
     try {
       message = JSON.parse(event.data) as Record<string, unknown>;
@@ -325,61 +316,21 @@ function connect(): void {
       case "state":
         if (message.state === "idle") {
           if (!voiceHeld) {
-            if (playback.size) returnAfterPlayback = true;
-            else {
-              view = "focus";
-              render();
-            }
+            view = "focus";
+            render();
           }
-        } else if (["listening", "thinking", "speaking"].includes(String(message.state))) {
+        } else if (["listening", "thinking", "sent"].includes(String(message.state))) {
           if (completion) break;
           view = message.state as View;
           render();
         }
         break;
-      case "transcript":
-        if (typeof message.text === "string") {
-          transcript = message.text;
-          render();
-        }
-        break;
-      case "reply":
-        if (typeof message.text === "string") {
-          reply = message.final ? message.text : reply + message.text;
-          render();
-        }
-        break;
       case "voice_job": {
-        const job = message.job as
-          | { state?: string; reply?: string; updatedAt?: number }
-          | undefined;
-        if (!job) break;
-        if (view === "thinking") {
-          if (job.state === "queued" || job.state === "sending") transcript = "Sending to Beeper…";
-          else if (job.state === "sent") transcript = "Waiting for Hermes…";
+        const job = message.job as { state?: string } | undefined;
+        if (job && view === "thinking") {
+          if (job.state === "queued" || job.state === "sending") voiceStatus = "Sending to Beeper…";
           render();
         }
-        if (
-          job.state === "replied" &&
-          typeof job.reply === "string" &&
-          typeof job.updatedAt === "number"
-        ) {
-          if (job.updatedAt > lastVoiceReplyAt) {
-            lastVoiceReplyAt = job.updatedAt;
-            // Recover a response received while this browser was disconnected.
-            if (view === "focus" && Date.now() - job.updatedAt < 10 * 60 * 1000) {
-              reply = job.reply;
-              view = "speaking";
-              render();
-            }
-          }
-        }
-        break;
-      }
-      case "tts_start": {
-        const format = message.format as { sampleRate?: number } | undefined;
-        audioRate = format?.sampleRate ?? 22050;
-        playbackAt = audioContext?.currentTime ?? 0;
         break;
       }
       case "error":
@@ -409,7 +360,7 @@ function connect(): void {
     socket = null;
     stopCapture();
     voiceHeld = false;
-    if (["listening", "thinking", "speaking"].includes(view)) view = "focus";
+    if (["listening", "thinking", "sent"].includes(view)) view = "focus";
     if (completion?.phase === "waiting") {
       completion = null;
       clearTimeout(completionTimeout);
@@ -526,26 +477,12 @@ function navigate(next: View, taskId?: string): void {
   const direction = next === "today" || (next === "focus" && view === "memo") ? -1 : 1;
   if (beginMotion(next, direction, taskId)) settleMotion(true);
 }
-function stopPlayback(): void {
-  for (const source of playback) {
-    try {
-      source.stop();
-    } catch {
-      /* already ended */
-    }
-  }
-  playback.clear();
-  playbackAt = 0;
-  returnAfterPlayback = false;
-}
 function cancel(): void {
   voiceEpoch++;
   voiceHeld = false;
   stopCapture();
-  stopPlayback();
   send({ type: "cancel" });
-  transcript = "";
-  reply = "";
+  voiceStatus = "";
   view = "focus";
   render();
 }
@@ -561,12 +498,10 @@ async function startVoice(): Promise<void> {
     notice("Connect to Alfred to talk.");
     return;
   }
-  if (["thinking", "speaking"].includes(view)) cancel();
+  if (["thinking", "sent"].includes(view)) cancel();
   voiceHeld = true;
   const epoch = ++voiceEpoch;
-  transcript = "";
-  reply = "";
-  stopPlayback();
+  voiceStatus = "";
   if (snapshot?.mode === "demo") {
     send({ type: "ptt_down", sampleRate: 16000, channels: 1 });
     view = "listening";
@@ -649,28 +584,6 @@ function finishVoice(): void {
     view = "thinking";
     render();
   }
-}
-function playAudio(data: ArrayBuffer): void {
-  if (!audioContext || !data.byteLength || data.byteLength % 2) return;
-  const pcm = new Int16Array(data);
-  const buffer = audioContext.createBuffer(1, pcm.length, audioRate);
-  const channel = buffer.getChannelData(0);
-  for (let i = 0; i < pcm.length; i++) channel[i] = pcm[i]! / 32768;
-  const source = audioContext.createBufferSource();
-  source.buffer = buffer;
-  source.connect(audioContext.destination);
-  playbackAt = Math.max(playbackAt, audioContext.currentTime + 0.03);
-  source.start(playbackAt);
-  playbackAt += buffer.duration;
-  playback.add(source);
-  source.onended = () => {
-    playback.delete(source);
-    if (!playback.size && returnAfterPlayback && !voiceHeld) {
-      returnAfterPlayback = false;
-      view = "focus";
-      render();
-    }
-  };
 }
 let gesture: {
   x: number;
@@ -778,7 +691,7 @@ screen.addEventListener("click", (event) => {
     send({ type: "refresh" });
     void refresh();
   } else if (target.closest("[data-voice],[data-noop]")) return;
-  else if (view === "thinking" || view === "speaking") cancel();
+  else if (view === "thinking" || view === "sent") cancel();
   else {
     const task = target.closest<HTMLElement>("[data-task]");
     if (task?.dataset.task) navigate("memo", task.dataset.task);
@@ -817,7 +730,7 @@ talkButton.addEventListener("pointercancel", () => {
 });
 document.querySelector("#action-button")!.addEventListener("click", () => {
   if (view === "focus") navigate("today");
-  else if (["listening", "thinking", "speaking"].includes(view)) cancel();
+  else if (["listening", "thinking", "sent"].includes(view)) cancel();
   else navigate("focus");
 });
 document.addEventListener("keydown", (event) => {
@@ -826,7 +739,7 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     void startVoice();
   } else if (event.key === "Escape") {
-    if (["listening", "thinking", "speaking"].includes(view)) cancel();
+    if (["listening", "thinking", "sent"].includes(view)) cancel();
     else navigate("focus");
   } else if (event.key === "ArrowUp" && view === "focus") {
     event.preventDefault();
