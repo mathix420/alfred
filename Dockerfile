@@ -23,7 +23,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     ALFRED_MATRIX_PYTHON=/opt/venv/bin/python
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y ca-certificates libolm3 ffmpeg \
+    && apt-get install --no-install-recommends -y ca-certificates libolm3 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 app \
     && useradd --uid 1000 --gid app --create-home app \
@@ -35,9 +35,6 @@ WORKDIR /app
 COPY apps/pocket/src ./apps/pocket/src
 COPY apps/pocket/web ./apps/pocket/web
 COPY apps/pocket/matrix ./apps/pocket/matrix
-COPY apps/companion/src/stt/whisper.ts ./apps/companion/src/stt/whisper.ts
-COPY apps/companion/src/tts/piper.ts ./apps/companion/src/tts/piper.ts
-COPY apps/companion/src/ports.ts apps/companion/src/protocol.ts ./apps/companion/src/
 
 USER app
 VOLUME ["/data"]

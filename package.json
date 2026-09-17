@@ -2,8 +2,7 @@
   "name": "alfred",
   "private": true,
   "workspaces": [
-    "apps/*",
-    "packages/*"
+    "apps/pocket"
   ],
   "type": "module",
   "scripts": {
@@ -15,9 +14,8 @@
     "lint:fix": "oxlint --fix",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
-    "dev:companion": "bun run --filter @alfred/companion dev",
-    "firmware:build": "pio run -d apps/companion/firmware -e companion_v1",
-    "firmware:flash": "pio run -d apps/companion/firmware -e companion_v1 -t upload"
+    "firmware:build": "pio run -d apps/pocket/firmware -e companion_v1",
+    "firmware:flash": "pio run -d apps/pocket/firmware -e companion_v1 -t upload"
   },
   "devDependencies": {
     "@types/bun": "latest",

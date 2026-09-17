@@ -85,7 +85,6 @@ jobs:
           test "$(docker exec "$container_id" id -u)" != 0
           docker exec "$container_id" /opt/venv/bin/python -c 'import vodozemac; from nio import AsyncClientConfig; assert AsyncClientConfig(encryption_enabled=True).encryption_enabled'
           docker exec "$container_id" /opt/venv/bin/python -m unittest discover -s apps/pocket/matrix -p 'test_*.py'
-          docker exec "$container_id" ffmpeg -version >/dev/null
           bun - <<'JS'
           import assert from "node:assert/strict";
           const base = process.env.CI_POCKET_URL;

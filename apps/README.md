@@ -1,13 +1,9 @@
-# apps/
+# Pocket app
 
-User-facing surfaces for Alfred. Each subdirectory is its own Bun workspace and
-depends on `@alfred/core` for the assistant logic — surfaces stay thin (I/O,
-transport, presentation) and never talk to LLM providers directly.
+`pocket/` contains Alfred's Bun server, touch preview, encrypted Matrix voice
+upload worker, and native ESP32 firmware. Tasks come directly from TodoMate.
 
-Add a surface as `apps/<name>/` with its own `package.json`
-(`"name": "@alfred/<name>"`) and a `tsconfig.json` extending
-`../../tsconfig.base.json`. Suggested first targets: `web` (Next.js chat UI),
-`cli` (terminal), `api` (HTTP service).
+Run `bun run dev` from the repository root to start the app, or
+`bun run firmware:build` to build the device firmware.
 
-A surface that should run under `bun run dev` / `bun run build` should define
-matching `dev` / `build` scripts; the root scripts fan out to every workspace.
+See the [project README](../README.md) for configuration and deployment.

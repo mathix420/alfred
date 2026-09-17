@@ -30,7 +30,7 @@ __pycache__/
 .DS_Store
 *.log
 
-# Neo4j offline dumps (precious data — push these off-box, don't commit them)
+# Local backup files
 scripts/*.dump
 
 # Claude Code (keep shared settings.json + hooks, ignore personal overrides)
