@@ -239,9 +239,7 @@ typedef struct {
   char id[ALFRED_TASK_ID_MAX], request_id[ALFRED_REQUEST_ID_MAX];
 } command_t;
 static QueueHandle_t s_commands;
-static atomic_bool s_voice_active, s_accept_audio, s_mic_failed,
-    s_have_pcm_byte;
-static uint8_t s_pcm_byte;
+static atomic_bool s_voice_active, s_mic_failed;
 static bool s_audio_ready;
 static int64_t s_record_started;
 
@@ -269,8 +267,6 @@ static void on_mic_frame(const uint8_t *pcm, size_t len, void *user) {
 }
 static void stop_voice(bool send_cancel) {
   atomic_store(&s_voice_active, false);
-  atomic_store(&s_accept_audio, false);
-  atomic_store(&s_have_pcm_byte, false);
   if (atomic_exchange(&s_ptt_active, false))
     audio_record_stop();
   audio_play_cancel();
@@ -380,7 +376,6 @@ static void on_connected(void *user) {
 }
 static void on_disconnected(void *user) {
   (void)user;
-  atomic_store(&s_accept_audio, false);
   enqueue(CMD_DISCONNECT);
 }
 static void on_welcome(const alfred_welcome_t *welcome, void *user) {
@@ -401,62 +396,9 @@ static void on_state(alfred_device_state_t state, void *user) {
     return;
   if (state == ALFRED_STATE_IDLE) {
     atomic_store(&s_voice_active, false);
-    atomic_store(&s_accept_audio, false);
     ui_set_state(state);
   } else if (atomic_load(&s_voice_active))
     ui_set_state(state);
-}
-static void on_transcript(const alfred_text_chunk_t *text, void *user) {
-  (void)user;
-  if (atomic_load(&s_voice_active))
-    ui_set_transcript(text->text, text->final);
-}
-static void on_reply(const alfred_text_chunk_t *reply, void *user) {
-  (void)user;
-  if (atomic_load(&s_voice_active))
-    ui_set_reply(reply->text, reply->final);
-}
-static void on_tts_begin(const alfred_audio_format_t *format, void *user) {
-  (void)user;
-  if (!atomic_load(&s_voice_active) || atomic_load(&s_ptt_active))
-    return;
-  atomic_store(&s_have_pcm_byte, false);
-  bool ok = s_audio_ready && audio_play_begin(format) == ESP_OK;
-  atomic_store(&s_accept_audio, ok);
-  if (!ok)
-    show_problem("audio_format",
-                 "Hermes replied. Speaker audio is unavailable.", NULL);
-}
-static void on_audio(const uint8_t *pcm, size_t len, void *user) {
-  (void)user;
-  if (!atomic_load(&s_accept_audio) || !len)
-    return;
-  esp_err_t err = ESP_OK;
-  // A WebSocket event may split a PCM sample between arbitrary TCP reads.
-  if (atomic_exchange(&s_have_pcm_byte, false)) {
-    uint8_t sample[2] = {s_pcm_byte, *pcm++};
-    len--;
-    err = audio_play_pcm(sample, sizeof(sample), 1000);
-  }
-  size_t aligned = len & ~(size_t)1;
-  if (err == ESP_OK && aligned)
-    err = audio_play_pcm(pcm, aligned, 1000);
-  if (len > aligned) {
-    s_pcm_byte = pcm[aligned];
-    atomic_store(&s_have_pcm_byte, true);
-  }
-  if (err != ESP_OK) {
-    atomic_store(&s_accept_audio, false);
-    atomic_store(&s_have_pcm_byte, false);
-    audio_play_cancel();
-    show_problem("audio_playback", "Audio interrupted. Try again.", NULL);
-  }
-}
-static void on_tts_end(void *user) {
-  (void)user;
-  atomic_store(&s_have_pcm_byte, false);
-  if (atomic_exchange(&s_accept_audio, false))
-    audio_play_end();
 }
 static void on_error(const alfred_error_t *error, void *user) {
   (void)user;
@@ -546,11 +488,7 @@ void app_main(void) {
                  .on_focus = on_focus,
                  .on_task_completed = on_task_completed,
                  .on_state = on_state,
-                 .on_transcript = on_transcript,
-                 .on_reply = on_reply,
-                 .on_tts_begin = on_tts_begin,
-                 .on_tts_end = on_tts_end,
-                 .on_audio = on_audio,
+                 // Voice is outbound only: no transcript/reply/TTS callbacks.
                  .on_error = on_error}};
       if (ws_client_start(&config) != ESP_OK)
         ESP_LOGW(TAG, "bridge could not start; retry after configuring WS_URI");

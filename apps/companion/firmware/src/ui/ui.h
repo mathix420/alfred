@@ -19,8 +19,6 @@ void ui_register_actions(ui_action_cb_t callback, void *user);
 void ui_lock(void);
 void ui_unlock(void);
 void ui_set_state(alfred_device_state_t state);
-void ui_set_transcript(const char *text, bool final);
-void ui_set_reply(const char *text, bool final);
 void ui_set_focus(const alfred_focus_snapshot_t *snapshot);
 void ui_task_completed(const alfred_task_completed_t *ack);
 void ui_set_connection(bool connected);

@@ -23,6 +23,7 @@ static const char *TAG = "pocket_ui";
 #define DRAW_LINES 40
 #define ACK_TIMEOUT_MS 10000
 #define COMPLETE_HOLD_MS 1250
+#define SENT_HOLD_MS 1000
 #define PAGE_SLIDE_MS 220
 #define PAGE_HEIGHT 448
 #define HEADER_END_Y 92
@@ -33,13 +34,13 @@ typedef enum {
   PAGE_MEMO,
   PAGE_LISTENING,
   PAGE_THINKING,
-  PAGE_SPEAKING,
+  PAGE_SENT,
   PAGE_OFFLINE
 } page_t;
 typedef struct {
   lv_obj_t *root, *body, *clock, *link, *status, *battery, *footer, *hint,
       *grabber;
-  lv_obj_t *hero, *title, *voice_text, *wave[5], *dots[3], *particles[9];
+  lv_obj_t *hero, *title, *wave[5], *dots[3], *particles[9];
   lv_obj_t *outgoing, *scroll, *memo_fade;
   alfred_focus_snapshot_t *snapshot, *deferred;
   bool has_deferred, connected, configured, demo, touch_down, touch_hold;
@@ -50,9 +51,9 @@ typedef struct {
   int selected, battery_pct;
   bool charging;
   char pending_id[ALFRED_TASK_ID_MAX], request_id[ALFRED_REQUEST_ID_MAX];
-  char transcript[ALFRED_TEXT_MAX], reply[ALFRED_TEXT_MAX], note[128];
+  char note[128];
   uint32_t request_counter, pending_since, complete_since, touch_since,
-      last_clock;
+      last_clock, sent_since;
   int16_t press_x, press_y, last_x, last_y;
   ui_action_cb_t action;
   void *action_user;
@@ -645,30 +646,21 @@ static void build_voice(void) {
     lv_obj_set_style_bg_color(dot, color(POCKET_GREEN), 0);
     lv_obj_set_style_bg_opa(dot, 255, 0);
     label(s.body, 135, 273, 160, "Listening", &inter_23, POCKET_TEXT);
-    s.voice_text =
-        label(s.body, 24, 320, 320, s.transcript, &inter_17, POCKET_SECONDARY);
-    lv_obj_set_style_text_align(s.voice_text, LV_TEXT_ALIGN_CENTER, 0);
     set_hint("Release to send", POCKET_DIM, false);
   } else if (s.page == PAGE_THINKING) {
     for (int i = 0; i < 3; i++)
       s.dots[i] = flower(s.body, 140 + i * 34, 192, 20,
                          i == 2 ? POCKET_GREEN : POCKET_UNCHECKED, false);
     lv_obj_t *l =
-        label(s.body, 24, 239, 320, "Thinking", &inter_23, POCKET_TEXT);
+        label(s.body, 24, 239, 320, "Sending", &inter_23, POCKET_TEXT);
     lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
-    s.voice_text =
-        label(s.body, 24, 289, 320, s.transcript, &inter_17, POCKET_DIM);
-    lv_obj_set_style_text_align(s.voice_text, LV_TEXT_ALIGN_CENTER, 0);
     set_hint("Tap to cancel", POCKET_DIM, false);
-  } else {
-    flower(s.body, 24, 93, 14, POCKET_GREEN, false);
-    label(s.body, 48, 89, 250, "Hermes", &inter_17, POCKET_GREEN);
-    lv_obj_t *scroll = scroll_view(s.body, 24, 138, 344, 249);
-    s.scroll = scroll;
-    s.voice_text = label(scroll, 0, 0, 320, s.reply[0] ? s.reply : "…",
-                         &inter_28, POCKET_TEXT);
-    lv_obj_set_style_text_line_space(s.voice_text, 0, 0);
-    set_hint("Tap to interrupt", POCKET_DIM, false);
+  } else if (s.page == PAGE_SENT) {
+    s.hero = flower(s.body, 124, 136, 120, POCKET_GREEN, true);
+    animate_pop(s.hero);
+    s.title = label(s.body, 24, 278, 320, "Sent!", &inter_28, POCKET_TEXT);
+    lv_obj_set_style_text_align(s.title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_add_flag(s.footer, LV_OBJ_FLAG_HIDDEN);
   }
 }
 static void build_offline(void) {
@@ -751,7 +743,6 @@ static void rebuild(void) {
   memset(s.particles, 0, sizeof(s.particles));
   s.hero = NULL;
   s.title = NULL;
-  s.voice_text = NULL;
   s.hint = NULL;
   s.scroll = NULL;
   s.memo_fade = NULL;
@@ -820,7 +811,7 @@ static void touch_release_action(int dx, int dy) {
     show_page(PAGE_FOCUS);
   else if (s.page == PAGE_FOCUS && s.press_y >= 60 && s.press_y < 402)
     begin_complete();
-  else if (s.page == PAGE_THINKING || s.page == PAGE_SPEAKING) {
+  else if (s.page == PAGE_THINKING) {
     emit(UI_CANCEL, NULL, NULL);
     show_page(PAGE_FOCUS);
   } else if (s.page == PAGE_OFFLINE) {
@@ -884,6 +875,10 @@ static void ui_tick(lv_timer_t *timer) {
   if (s.completing && s.acknowledged &&
       now - s.complete_since >= COMPLETE_HOLD_MS)
     finish_complete();
+  // Matrix has already acknowledged delivery. Return even if its subsequent
+  // idle packet is lost while the device disconnects.
+  if (s.page == PAGE_SENT && now - s.sent_since >= SENT_HOLD_MS)
+    show_page(PAGE_FOCUS);
   // A same-page cloud update must not delete the viewport under a finger.
   if (s.rebuild && (!s.touch_down || s.page != s.rendered_page))
     rebuild();
@@ -1043,8 +1038,7 @@ void ui_set_connection(bool connected) {
   s.connected = connected;
   if (!connected && s.pending)
     cancel_pending("Not saved. Reconnect to try again.");
-  if (!connected && (s.page == PAGE_LISTENING || s.page == PAGE_THINKING ||
-                     s.page == PAGE_SPEAKING))
+  if (!connected && (s.page == PAGE_LISTENING || s.page == PAGE_THINKING))
     show_page(PAGE_OFFLINE);
   update_status();
   ui_unlock();
@@ -1093,29 +1087,18 @@ void ui_task_completed(const alfred_task_completed_t *ack) {
   ui_unlock();
 }
 void ui_set_state(alfred_device_state_t state) {
+  // The pocket records voice messages only; legacy spoken-reply states have no UI.
+  if (state == ALFRED_STATE_SPEAKING)
+    return;
   ui_lock();
   page_t page = state == ALFRED_STATE_LISTENING  ? PAGE_LISTENING
                 : state == ALFRED_STATE_THINKING ? PAGE_THINKING
-                : state == ALFRED_STATE_SPEAKING ? PAGE_SPEAKING
+                : state == ALFRED_STATE_SENT ? PAGE_SENT
                                                  : PAGE_FOCUS;
+  if (page == PAGE_SENT && s.page != PAGE_SENT)
+    s.sent_since = ticks();
   if (s.page != page)
     show_page(page);
-  ui_unlock();
-}
-void ui_set_transcript(const char *text, bool final) {
-  (void) final;
-  ui_lock();
-  copy(s.transcript, sizeof(s.transcript), text);
-  if (s.voice_text && (s.page == PAGE_LISTENING || s.page == PAGE_THINKING))
-    lv_label_set_text(s.voice_text, s.transcript);
-  ui_unlock();
-}
-void ui_set_reply(const char *text, bool final) {
-  (void) final;
-  ui_lock();
-  copy(s.reply, sizeof(s.reply), text);
-  if (s.voice_text && s.page == PAGE_SPEAKING)
-    lv_label_set_text(s.voice_text, s.reply);
   ui_unlock();
 }
 void ui_show_error(const alfred_error_t *error) {
@@ -1134,7 +1117,7 @@ void ui_handle_back(void) {
   if (s.page == PAGE_LISTENING) {
     s.touch_hold = false;
     emit(UI_CANCEL, NULL, NULL);
-  } else if (s.page == PAGE_THINKING || s.page == PAGE_SPEAKING)
+  } else if (s.page == PAGE_THINKING)
     emit(UI_CANCEL, NULL, NULL);
   show_page(s.page == PAGE_FOCUS ? PAGE_TODAY : PAGE_FOCUS);
   ui_unlock();
@@ -1151,8 +1134,6 @@ void ui_handle_ptt(bool pressed) {
       ui_unlock();
       return;
     }
-    s.transcript[0] = 0;
-    s.reply[0] = 0;
     s.note[0] = 0;
     show_page(PAGE_LISTENING);
     emit(UI_PTT_DOWN, NULL, NULL);

@@ -49,6 +49,7 @@ static const char *const k_state_names[ALFRED_STATE__COUNT] = {
     [ALFRED_STATE_LISTENING] = "listening",
     [ALFRED_STATE_THINKING] = "thinking",
     [ALFRED_STATE_SPEAKING] = "speaking",
+    [ALFRED_STATE_SENT] = "sent",
 };
 
 const char *alfred_device_state_str(alfred_device_state_t state) {
