@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { HermesAdapter } from "./hermes";
+import type { TaskAdapter } from "./types";
 import { identifier, parseTaskList, PocketError, type FocusTask, type TaskList } from "./types";
 
 export interface TodoMateApiConfig {
@@ -18,7 +18,7 @@ interface ApiTask {
 type Fetcher = (url: string, init: RequestInit) => Promise<Response>;
 
 /** TodoMate is authoritative, including tasks reopened from another client. */
-export class TodoMateApiAdapter implements HermesAdapter {
+export class TodoMateApiAdapter implements TaskAdapter {
   readonly authoritativeCompletions = true;
   private readonly upstreamIds = new Map<string, string>();
   private latest: TaskList = { tasks: [], focusId: null };
@@ -106,10 +106,6 @@ export class TodoMateApiAdapter implements HermesAdapter {
     next.focusId = next.tasks.find((item) => !item.completed)?.id ?? null;
     this.latest = parseTaskList(next);
     return structuredClone(this.latest);
-  }
-
-  async chat(): Promise<string> {
-    throw new PocketError("speech_unconfigured", "Connect Matrix to talk to Hermes.", 503);
   }
 
   private async request(path: string, init: RequestInit, signal?: AbortSignal): Promise<unknown> {

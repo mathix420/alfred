@@ -13,7 +13,6 @@ export interface MatrixConfig {
   storeDirectory: string;
   voiceDirectory: string;
   python: string;
-  replyTimeoutMs: number;
 }
 
 export interface PocketConfig {
@@ -24,40 +23,16 @@ export interface PocketConfig {
   matrix: MatrixConfig;
   hostname: string;
   port: number;
-  hermesBaseUrl: string;
-  hermesApiKey: string;
-  hermesModel: string;
   requestTimeoutMs: number;
   pollIntervalMs: number;
   dataFile: string | null;
   webDirectory: string;
-  sttModel: string;
-  sttBinary: string;
-  sttLanguage: string;
-  ttsModel: string;
-  ttsBinary: string;
-  ttsSampleRate: number;
 }
 
 type Env = Record<string, string | undefined>;
 const pocketDirectory = resolve(import.meta.dir, "..");
 
 export function loadPocketConfig(env: Env = process.env): PocketConfig {
-  const hermesBaseUrl = (env.ALFRED_HERMES_BASE_URL ?? "").trim().replace(/\/+$/, "");
-  if (hermesBaseUrl) {
-    const url = new URL(hermesBaseUrl);
-    if (
-      !["https:", "http:"].includes(url.protocol) ||
-      url.username ||
-      url.password ||
-      url.search ||
-      url.hash
-    ) {
-      throw new Error(
-        "ALFRED_HERMES_BASE_URL must be an HTTP(S) URL without credentials, query, or fragment.",
-      );
-    }
-  }
   const todomateBaseUrl = (env.ALFRED_TODOMATE_API_URL ?? "").trim().replace(/\/+$/, "");
   if (todomateBaseUrl) {
     const parsed = new URL(todomateBaseUrl);
@@ -112,26 +87,16 @@ export function loadPocketConfig(env: Env = process.env): PocketConfig {
       storeDirectory: resolve(env.ALFRED_MATRIX_STORE_DIR || `${pocketDirectory}/.data/matrix`),
       voiceDirectory: resolve(env.ALFRED_POCKET_VOICE_DIR || `${pocketDirectory}/.data/voice`),
       python: env.ALFRED_MATRIX_PYTHON?.trim() || "python3",
-      replyTimeoutMs: integer(env, "ALFRED_MATRIX_REPLY_TIMEOUT_MS", 180000, 1000, 900000),
     },
     hostname: env.ALFRED_POCKET_HOST?.trim() || "127.0.0.1",
     port: integer(env, "ALFRED_POCKET_PORT", 9191, 0, 65535),
-    hermesBaseUrl,
-    hermesApiKey: (env.ALFRED_HERMES_API_KEY ?? "").trim(),
-    hermesModel: env.ALFRED_HERMES_MODEL?.trim() || "hermes-agent",
-    requestTimeoutMs: integer(env, "ALFRED_HERMES_TIMEOUT_MS", 60000, 100, 180000),
+    requestTimeoutMs: integer(env, "ALFRED_POCKET_REQUEST_TIMEOUT_MS", 60000, 100, 180000),
     pollIntervalMs: integer(env, "ALFRED_POCKET_POLL_MS", 60000, 1000, 3600000),
     dataFile:
       env.ALFRED_POCKET_DATA_FILE === ""
         ? null
         : resolve(env.ALFRED_POCKET_DATA_FILE ?? `${pocketDirectory}/.data/tasks.json`),
     webDirectory: resolve(pocketDirectory, "web"),
-    sttModel: env.ALFRED_STT_MODEL?.trim() || "",
-    sttBinary: env.ALFRED_STT_BINARY?.trim() || "whisper-cli",
-    sttLanguage: env.ALFRED_STT_LANGUAGE?.trim() || "",
-    ttsModel: env.ALFRED_TTS_MODEL?.trim() || "",
-    ttsBinary: env.ALFRED_TTS_BINARY?.trim() || "piper",
-    ttsSampleRate: integer(env, "ALFRED_TTS_SAMPLE_RATE", 22050, 8000, 48000),
   };
 }
 
@@ -143,10 +108,6 @@ function integer(env: Env, key: string, fallback: number, min: number, max: numb
   if (!Number.isSafeInteger(number) || number < min || number > max)
     throw new Error(`${key} is out of range.`);
   return number;
-}
-
-export function isLive(config: PocketConfig): boolean {
-  return Boolean(config.hermesBaseUrl && config.hermesApiKey);
 }
 
 export function matrixConfigured(config: MatrixConfig): boolean {

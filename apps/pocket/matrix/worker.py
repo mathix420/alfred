@@ -87,46 +87,26 @@ def voice_content(file_info: dict, uri: str, size: int, duration_ms: int, hermes
 
 
 class Journal:
+    """Outgoing transaction journal only. Incoming chat bodies are never stored."""
     def __init__(self, path: Path):
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
           PRAGMA journal_mode=WAL;
           PRAGMA synchronous=FULL;
+          PRAGMA secure_delete=ON;
           CREATE TABLE IF NOT EXISTS deliveries (
             id TEXT PRIMARY KEY, audio_hash TEXT NOT NULL, created_at INTEGER NOT NULL,
-            content TEXT, event_id TEXT UNIQUE, reply TEXT
+            content TEXT, event_id TEXT UNIQUE
           );
-          CREATE TABLE IF NOT EXISTS replies (
-            event_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, body TEXT NOT NULL, sequence INTEGER NOT NULL
-          );
-          CREATE TABLE IF NOT EXISTS seen_events (event_id TEXT PRIMARY KEY);
-          CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS inbox (event_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+          DROP TABLE IF EXISTS replies;
+          DROP TABLE IF EXISTS inbox;
+          DROP TABLE IF EXISTS seen_events;
+          DROP TABLE IF EXISTS metadata;
         """)
-
-    def cursor(self):
-        row = self.db.execute("SELECT value FROM metadata WHERE key='sync_cursor'").fetchone()
-        return row["value"] if row else None
-
-    def save_cursor(self, token: str):
-        with self.db:
-            self.db.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('sync_cursor',?)", (token,))
-
-    def remember(self, args: tuple):
-        # A verified reply may arrive before room_send returns its event ID.
-        if not args[4] or not args[5]:
-            return
-        with self.db:
-            self.db.execute("INSERT OR REPLACE INTO inbox(event_id,payload) VALUES(?,?)", (args[2], json.dumps(args)))
-            self.db.execute("DELETE FROM inbox WHERE rowid NOT IN (SELECT rowid FROM inbox ORDER BY rowid DESC LIMIT 2000)")
-
-    def buffered(self):
-        return [json.loads(row["payload"]) for row in self.db.execute("SELECT payload FROM inbox ORDER BY rowid")]
-
-    def oldest_pending(self):
-        row = self.db.execute("SELECT min(created_at) AS created_at FROM deliveries WHERE reply IS NULL").fetchone()
-        return row["created_at"]
+        if any(row["name"] == "reply" for row in self.db.execute("PRAGMA table_info(deliveries)")):
+            with self.db:
+                self.db.execute("UPDATE deliveries SET reply=NULL")
 
     def job(self, job_id: str):
         return self.db.execute("SELECT * FROM deliveries WHERE id=?", (job_id,)).fetchone()
@@ -146,67 +126,6 @@ class Journal:
     def sent(self, job_id: str, event_id: str) -> None:
         with self.db:
             self.db.execute("UPDATE deliveries SET event_id=? WHERE id=?", (event_id, job_id))
-
-    def correlate(self, relation: dict) -> tuple[str, str | None] | None:
-        if not isinstance(relation, dict):
-            return None
-        if relation.get("rel_type") == "m.replace":
-            target = relation.get("event_id")
-            row = self.db.execute("SELECT job_id FROM replies WHERE event_id=?", (target,)).fetchone()
-            return (row["job_id"], target) if row else None
-        references = []
-        if relation.get("rel_type") == "m.thread":
-            references.append(relation.get("event_id"))
-        reply_to = relation.get("m.in_reply_to")
-        if isinstance(reply_to, dict):
-            references.append(reply_to.get("event_id"))
-        matches = set()
-        for reference in references:
-            if not isinstance(reference, str):
-                continue
-            row = self.db.execute("SELECT id FROM deliveries WHERE event_id=?", (reference,)).fetchone()
-            if row:
-                matches.add(row["id"])
-            row = self.db.execute("SELECT job_id FROM replies WHERE event_id=?", (reference,)).fetchone()
-            if row:
-                matches.add(row["job_id"])
-        return (next(iter(matches)), None) if len(matches) == 1 else None
-
-    def accept_reply(self, room_id: str, sender: str, event_id: str, content: dict,
-                     decrypted: bool, verified: bool, expected_room: str, expected_sender: str):
-        if room_id != expected_room or sender != expected_sender or not decrypted or not verified:
-            return None
-        if not isinstance(content, dict) or content.get("msgtype") not in ("m.text", "m.audio"):
-            return None
-        if self.db.execute("SELECT 1 FROM seen_events WHERE event_id=?", (event_id,)).fetchone():
-            return None
-        relation = content.get("m.relates_to", {})
-        match = self.correlate(relation)
-        if not match:
-            return None
-        job_id, edit_target = match
-        payload = content.get("m.new_content", {}) if edit_target else content
-        body = payload.get("body") if isinstance(payload, dict) else None
-        if content.get("msgtype") == "m.audio":
-            caption = body.strip() if isinstance(body, str) else ""
-            body = "Hermes sent a voice reply. Open Beeper to listen." + ("\n\n" + caption if caption and len(caption) <= 2000 else "")
-        if not isinstance(body, str) or not body.strip() or len(body) > 16000:
-            return None
-        if body.startswith("> ") and "\n\n" in body:
-            body = body.split("\n\n", 1)[1]
-        if not body.strip():
-            return None
-        with self.db:
-            self.db.execute("INSERT INTO seen_events(event_id) VALUES(?)", (event_id,))
-            if edit_target:
-                self.db.execute("UPDATE replies SET body=? WHERE event_id=? AND job_id=?", (body, edit_target, job_id))
-            else:
-                self.db.execute("INSERT INTO replies(event_id,job_id,body,sequence) VALUES(?,?,?,?)", (event_id, job_id, body, time.time_ns()))
-            parts = self.db.execute("SELECT body FROM replies WHERE job_id=? ORDER BY sequence", (job_id,)).fetchall()
-            text = "\n\n".join(row["body"] for row in parts)[-32000:]
-            self.db.execute("UPDATE deliveries SET reply=? WHERE id=?", (text, job_id))
-            self.db.execute("DELETE FROM inbox WHERE event_id=?", (event_id,))
-        return {"type": "reply", "jobId": job_id, "eventId": event_id, "text": text}
 
 
 class Worker:
@@ -236,11 +155,10 @@ class Worker:
         self.client = None
         self.processing: set[str] = set()
         self.serial = asyncio.Lock()
-        self.recent: list[tuple] = []
         self.tasks: set[asyncio.Task] = set()
 
     async def start(self):
-        from nio import AsyncClient, AsyncClientConfig, Event, ErrorResponse, SyncResponse
+        from nio import AsyncClient, AsyncClientConfig, ErrorResponse, SyncResponse
         from nio.store import SqliteStore
         import aiohttp
         # Resolve account identity and the *existing* device identity before uploading keys.
@@ -266,7 +184,7 @@ class Worker:
                 except asyncio.TimeoutError:
                     raise BridgeError("matrix_sync_timeout") from None
 
-        config = AsyncClientConfig(encryption_enabled=True, store=SqliteStore, store_sync_tokens=False,
+        config = AsyncClientConfig(encryption_enabled=True, store=SqliteStore, store_sync_tokens=True,
                                    pickle_key=self.pickling, max_timeouts=2, max_limit_exceeded=2, request_timeout=30)
         self.client = BoundedClient(self.home, self.user, device_id=self.device, store_path=str(self.store), config=config)
         self.client.restore_login(self.user, self.device, self.token)
@@ -276,9 +194,7 @@ class Worker:
         if remote_key and remote_key != local_key:
             raise BridgeError("matrix_crypto_store_mismatch")
         emit({"type": "identity", "deviceId": self.device, "ed25519": local_key})
-        self.client.add_event_callback(self.on_event, Event)
-        cursor = self.journal.cursor()
-        # Bootstrap room state and verify pinned devices before processing any timeline.
+        # Sync encryption state and room keys only; no incoming message callbacks.
         response = await asyncio.wait_for(self.client.sync(timeout=0, full_state=True,
             sync_filter={"room": {"rooms": [self.room], "timeline": {"limit": 0}}}), timeout=60)
         if not isinstance(response, SyncResponse):
@@ -290,17 +206,13 @@ class Worker:
             from nio import KeysUploadResponse
             if not isinstance(await self.client.keys_upload(), KeysUploadResponse):
                 raise BridgeError("matrix_keys_upload_failed")
-        # nio saves its cursor before callbacks; our cursor advances only after journaling.
-        self.client.next_batch = cursor
-        self.client.loaded_sync_token = None
-        self.client.add_response_callback(self.on_sync, SyncResponse)
         async def reject_sync_error(_response):
             # sync_forever otherwise keeps HTTP error responses in a busy loop.
             raise BridgeError("matrix_sync_failed")
         self.client.add_response_callback(reject_sync_error, ErrorResponse)
         emit({"type": "ready"})
-        sync = asyncio.create_task(self.client.sync_forever(timeout=30000, since=cursor,
-            sync_filter={"room": {"rooms": [self.room], "timeline": {"limit": 100}}}))
+        sync = asyncio.create_task(self.client.sync_forever(timeout=30000,
+            sync_filter={"room": {"rooms": [self.room], "timeline": {"limit": 0}}}))
         commands = asyncio.create_task(self.commands())
         try:
             done, _ = await asyncio.wait((sync, commands), return_when=asyncio.FIRST_COMPLETED)
@@ -316,34 +228,6 @@ class Worker:
             await asyncio.gather(sync, commands, *self.tasks, return_exceptions=True)
             await self.client.close()
             self.journal.db.close()
-
-    async def on_sync(self, response):
-        # Limited timelines can omit a reply while offline. Read backwards to the
-        # oldest pending request before committing the cursor (bounded to 2,000 events).
-        from nio import RoomMessagesResponse
-        joined = response.rooms.join.get(self.room)
-        oldest = self.journal.oldest_pending()
-        if joined and joined.timeline.limited and oldest is not None:
-            token = joined.timeline.prev_batch
-            collected = []
-            complete = False
-            for _ in range(20):
-                history = await asyncio.wait_for(self.client.room_messages(self.room, start=token, limit=100), timeout=60)
-                if not isinstance(history, RoomMessagesResponse):
-                    raise BridgeError("matrix_history_unavailable")
-                collected.extend(history.chunk)
-                if not history.chunk or any(getattr(event, "server_timestamp", 0) < oldest - 60000 for event in history.chunk):
-                    complete = True
-                    break
-                if not history.end or history.end == token:
-                    complete = True
-                    break
-                token = history.end
-            if not complete:
-                raise BridgeError("matrix_history_limit")
-            for event in reversed(collected):
-                await self.on_event(self.client.rooms[self.room], event)
-        self.journal.save_cursor(response.next_batch)
 
     async def ensure_trust(self):
         from nio import JoinedMembersResponse, KeysQueryResponse
@@ -409,8 +293,6 @@ class Worker:
                 row = self.journal.job(job_id)
                 if row and row["event_id"]:
                     emit({"type": "sent", "jobId": job_id, "eventId": row["event_id"]})
-                    if row["reply"]:
-                        emit({"type": "reply", "jobId": job_id, "eventId": row["event_id"], "text": row["reply"]})
                     return
                 await self.ensure_trust()
                 path = Path(command["path"]).resolve()
@@ -440,8 +322,6 @@ class Worker:
                     raise BridgeError("matrix_send_failed")
                 self.journal.sent(job_id, response.event_id)
                 emit({"type": "sent", "jobId": job_id, "eventId": response.event_id})
-                for args in self.journal.buffered():
-                    self.accept_event(*args)
         except BridgeError as error:
             retryable = error.code in {"matrix_upload_failed", "matrix_send_failed", "matrix_key_query", "matrix_room_members"}
             emit({"type": "retry" if retryable else "failed", "jobId": job_id, "code": error.code})
@@ -452,19 +332,6 @@ class Worker:
         finally:
             self.processing.discard(job_id)
 
-    def accept_event(self, room_id, sender, event_id, content, decrypted, verified):
-        reply = self.journal.accept_reply(room_id, sender, event_id, content, decrypted, verified,
-                                          self.room, self.hermes)
-        if reply:
-            emit(reply)
-
-    async def on_event(self, room, event):
-        if room.room_id != self.room or getattr(event, "sender", None) != self.hermes:
-            return
-        args = (room.room_id, event.sender, event.event_id, event.source.get("content", {}),
-                bool(getattr(event, "decrypted", False)), bool(getattr(event, "verified", False)))
-        self.journal.remember(args)
-        self.accept_event(*args)
 
 
 async def main():

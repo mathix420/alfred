@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { afterEach, expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -72,37 +73,38 @@ it("durably deduplicates recordings, isolates devices, and resumes the same job 
   await next.start();
   nextTransport.receive({ type: "ready" });
   expect(nextTransport.sent.map((item) => item.id)).toEqual([job.id]);
+  const receipt = next.waitForSent(job.id, AbortSignal.timeout(2000));
   nextTransport.receive({ type: "sent", jobId: job.id, eventId: "$event" });
-  const reply = next.waitForReply(job.id, AbortSignal.timeout(2000));
-  nextTransport.receive({ type: "reply", jobId: job.id, eventId: "$reply", text: "Your reply" });
-  expect(await reply).toBe("Your reply");
-  expect(next.get(job.id)?.state).toBe("replied");
+  expect((await receipt).matrixEventId).toBe("$event");
+  expect(next.get(job.id)?.state).toBe("sent");
+  await until(() => !existsSync(nextTransport.sent[0]!.path));
   expect((await next.submit("device-a", "request-a", audio)).id).toBe(job.id);
   expect(nextTransport.sent).toHaveLength(1);
+  await next.stop();
+  const completedTransport = new FakeTransport();
+  const completed = new MatrixVoiceService(path, completedTransport);
+  services.push(completed);
+  await completed.start();
+  completedTransport.receive({ type: "ready" });
+  expect(completed.get(job.id)?.state).toBe("sent");
+  expect(completedTransport.sent).toHaveLength(0);
 });
 
-it("aborting the device wait preserves the queued message and accepts its later reply", async () => {
+it("aborting the device wait preserves the queued message and its later delivery receipt", async () => {
   const transport = new FakeTransport();
   const service = new MatrixVoiceService(await directory(), transport);
   services.push(service);
   await service.start();
   const job = await service.submit("device-a", "request-a", new Uint8Array([0, 0]));
   const controller = new AbortController();
-  const wait = service.waitForReply(job.id, controller.signal);
+  const wait = service.waitForSent(job.id, controller.signal);
   controller.abort();
-  await expect(wait).rejects.toThrow("remains available");
+  await expect(wait).rejects.toThrow("remains queued");
   expect(service.get(job.id)?.state).toBe("queued");
-  transport.receive({
-    type: "reply",
-    jobId: job.id,
-    eventId: "$reply",
-    text: "Recovered response",
-  });
   transport.receive({ type: "sent", jobId: job.id, eventId: "$sent" });
   expect(service.get(job.id)).toMatchObject({
-    state: "replied",
+    state: "sent",
     matrixEventId: "$sent",
-    reply: "Recovered response",
   });
 });
 
@@ -161,7 +163,6 @@ it("fails closed for configured live backends without a device token", async () 
   for (const env of [
     { ALFRED_MATRIX_ENABLED: "true" },
     { ALFRED_TODOMATE_API_URL: "https://tasks.example", TODOMATE_MCP_ACCESS_TOKEN: "secret" },
-    { ALFRED_HERMES_BASE_URL: "https://hermes.example", ALFRED_HERMES_API_KEY: "secret" },
   ]) {
     const app = await createPocketServer(
       { ...loadPocketConfig(env), port: 0, dataFile: null },
@@ -207,7 +208,7 @@ it("accepts the explicitly configured reverse-proxy origin and rejects others", 
   ).toBe(403);
 });
 
-it("authenticates the browser hello and routes encrypted voice job replies only to the sending device", async () => {
+it("authenticates the browser hello and routes encrypted voice delivery receipts only to the sending device", async () => {
   const transport = new FakeTransport();
   const matrix = new MatrixVoiceService(await directory(), transport);
   const app = await createPocketServer(config(), { matrix, poll: false });
@@ -256,23 +257,13 @@ it("authenticates the browser hello and routes encrypted voice job replies only 
   await until(() => transport.sent.length === 1);
   const id = transport.sent[0]!.id;
   transport.receive({ type: "sent", jobId: id, eventId: "$voice" });
-  transport.receive({ type: "reply", jobId: id, eventId: "$reply", text: "Hello from Hermes" });
-  await until(() => sender.frames.some((frame) => frame.type === "reply"));
-  expect(sender.frames.find((frame) => frame.type === "reply")?.text).toBe("Hello from Hermes");
-  transport.receive({
-    type: "reply",
-    jobId: id,
-    eventId: "$reply-edit",
-    text: "Hello from Hermes. Here is the final answer.",
-  });
   await until(() =>
-    sender.frames.some(
-      (frame) =>
-        frame.type === "reply" && frame.text === "Hello from Hermes. Here is the final answer.",
-    ),
+    sender.frames.some((frame) => frame.type === "state" && frame.state === "sent"),
   );
-  expect(sender.frames.filter((frame) => frame.type === "reply").at(-1)?.final).toBe(true);
-  expect(other.frames.some((frame) => frame.type === "voice_job" || frame.type === "reply")).toBe(
+  expect(sender.frames.some((frame) => frame.type === "reply" || frame.type === "transcript")).toBe(
+    false,
+  );
+  expect(other.frames.some((frame) => frame.type === "voice_job" || frame.state === "sent")).toBe(
     false,
   );
   sender.ws.send(JSON.stringify({ type: "cancel" }));

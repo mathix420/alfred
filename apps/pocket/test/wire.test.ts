@@ -3,6 +3,8 @@ import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { MatrixVoiceService } from "../src/matrix";
+import { authenticatedSocket, TestMatrixTransport } from "./fixtures/matrix-transport";
 import { loadPocketConfig } from "../src/config";
 import { createPocketServer, type PocketApplication } from "../src/server";
 import { demoTasks } from "../src/tasks";
@@ -33,7 +35,7 @@ contract("Bun ↔ ESP32 C wire contract (requires cc and official cJSON source)"
   beforeAll(async () => {
     directory = await mkdtemp(join(tmpdir(), "pocket-protocol-"));
     binary = join(directory, "protocol-harness");
-    const protocol = resolve(import.meta.dir, "../../companion/firmware/src/net");
+    const protocol = resolve(import.meta.dir, "../firmware/src/net");
     const process = Bun.spawn(
       [
         compiler!,
@@ -79,8 +81,13 @@ contract("Bun ↔ ESP32 C wire contract (requires cc and official cJSON source)"
   }
 
   it("parses actual Bun hello, task snapshot, acknowledgement, voice and error frames", async () => {
+    const settings = loadPocketConfig({
+      ALFRED_MATRIX_ENABLED: "true",
+      ALFRED_DEVICE_TOKEN: "contract-token",
+    });
+    const matrix = new MatrixVoiceService(join(directory, "voice"), new TestMatrixTransport());
     app = await createPocketServer(
-      { ...loadPocketConfig({}), port: 0, dataFile: null },
+      { ...settings, port: 0, dataFile: null },
       {
         poll: false,
         adapter: {
@@ -93,19 +100,12 @@ contract("Bun ↔ ESP32 C wire contract (requires cc and official cJSON source)"
             list.focusId = "walk";
             return list;
           },
-          chat: async () => "Léa, focus on your investor demo.",
         },
-        stt: { transcribe: async () => ({ text: "What should I do?" }) },
-        tts: {
-          format: { encoding: "pcm_s16le", sampleRate: 22050, channels: 1 },
-          synthesize: async function* () {
-            yield new Uint8Array([0, 0]);
-          },
-        },
+        matrix,
       },
     );
     await app.store.refresh();
-    const ws = new WebSocket(`ws://127.0.0.1:${app.server.port}/ws`);
+    const ws = authenticatedSocket(`ws://127.0.0.1:${app.server.port}/ws`, "contract-token");
     const frames: Record<string, unknown>[] = [];
     ws.onmessage = (event) => {
       if (typeof event.data === "string") frames.push(JSON.parse(event.data));
@@ -155,20 +155,16 @@ contract("Bun ↔ ESP32 C wire contract (requires cc and official cJSON source)"
       send({ type: "ptt_down", sampleRate: 16000, channels: 1 });
       ws.send(new Uint8Array([0, 0]));
       send({ type: "ptt_up" });
-      await wait(() => frames.some((frame) => frame.type === "tts_end"));
-      expect(await parse(frames.find((frame) => frame.type === "tts_start"))).toEqual({
-        result: "ok",
-        type: "tts_start",
-        codec: "pcm_s16le",
-        sampleRate: 22050,
-        channels: 1,
-      });
-      expect(await parse(frames.find((frame) => frame.type === "reply"))).toEqual({
-        result: "ok",
-        type: "reply",
-        text: "Léa, focus on your investor demo.",
-        final: true,
-      });
+      await wait(() => frames.some((frame) => frame.type === "state" && frame.state === "sent"));
+      expect(frames.some((frame) => frame.type === "tts_start" || frame.type === "tts_end")).toBe(
+        false,
+      );
+      expect(
+        await parse(frames.find((frame) => frame.type === "state" && frame.state === "sent")),
+      ).toEqual({ result: "ok", type: "state", state: "sent" });
+      expect(frames.some((frame) => frame.type === "reply" || frame.type === "transcript")).toBe(
+        false,
+      );
       send({ type: "complete_task", id: "unknown-task", requestId: "contract-error" });
       await wait(() => frames.some((frame) => frame.type === "error"));
       const error = frames.find((frame) => frame.type === "error")!;
@@ -215,6 +211,18 @@ contract("Bun ↔ ESP32 C wire contract (requires cc and official cJSON source)"
   });
 
   it("rejects malformed controls and snapshots over the firmware task limit", async () => {
+    expect(
+      await parse({
+        type: "tts_start",
+        format: { codec: "pcm_s16le", sampleRate: 22050, channels: 1 },
+      }),
+    ).toEqual({
+      result: "ok",
+      type: "tts_start",
+      codec: "pcm_s16le",
+      sampleRate: 22050,
+      channels: 1,
+    });
     expect((await parse("not json", true)).result).toBe("bad_json");
     expect((await parse({ type: "state", state: "unknown" })).result).toBe("bad_field");
     expect(

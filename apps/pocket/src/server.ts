@@ -1,34 +1,27 @@
 import type { Server, ServerWebSocket } from "bun";
 import { resolve } from "node:path";
 import { timingSafeEqual } from "node:crypto";
-import type { SpeechToText, TextToSpeech } from "../../companion/src/ports";
-import { WhisperStt } from "../../companion/src/stt/whisper";
-import { PiperTts } from "../../companion/src/tts/piper";
-import { isLive, matrixConfigured, type PocketConfig } from "./config";
-import { HttpHermesAdapter, type HermesAdapter } from "./hermes";
+import { matrixConfigured, type PocketConfig } from "./config";
+import type { TaskAdapter } from "./types";
 import { TodoMateApiAdapter } from "./todomate";
 import { MatrixVoiceService, PythonMatrixTransport } from "./matrix";
 import { TaskStore } from "./tasks";
-import { fitDeviceText, identifier, PocketError, publicError } from "./types";
+import { identifier, PocketError, publicError } from "./types";
 
 interface Connection {
   authenticated: boolean;
   deviceId: string;
   requestId: string | null;
-  voiceJobId: string | null;
   ready: boolean;
   turn: AbortController | null;
   audio: Uint8Array[];
   audioBytes: number;
   recording: boolean;
   captureTimer: ReturnType<typeof setTimeout> | null;
-  drains: Set<() => void>;
 }
 
 export interface PocketServerOverrides {
-  adapter?: HermesAdapter | null;
-  stt?: SpeechToText;
-  tts?: TextToSpeech;
+  adapter?: TaskAdapter | null;
   store?: TaskStore;
   poll?: boolean;
   matrix?: MatrixVoiceService;
@@ -56,14 +49,6 @@ export async function createPocketServer(
             accessToken: config.todomateAccessToken,
             timeoutMs: config.requestTimeoutMs,
           })
-        : isLive(config)
-          ? new HttpHermesAdapter(config)
-          : null;
-  const voiceAdapter =
-    overrides.adapter !== undefined
-      ? overrides.adapter
-      : isLive(config)
-        ? new HttpHermesAdapter(config)
         : null;
   const matrix =
     overrides.matrix ??
@@ -93,24 +78,6 @@ export async function createPocketServer(
       };
     return snapshot;
   };
-  const stt =
-    overrides.stt ??
-    (config.sttModel
-      ? new WhisperStt({
-          binary: config.sttBinary,
-          model: config.sttModel,
-          ...(config.sttLanguage ? { language: config.sttLanguage } : {}),
-        })
-      : undefined);
-  const tts =
-    overrides.tts ??
-    (config.ttsModel
-      ? new PiperTts({
-          binary: config.ttsBinary,
-          model: config.ttsModel,
-          sampleRate: config.ttsSampleRate,
-        })
-      : undefined);
   const clients = new Set<ServerWebSocket<Connection>>();
   const shutdown = new AbortController();
   let browserBundle: Promise<string> | undefined;
@@ -140,10 +107,7 @@ export async function createPocketServer(
   function cancel(ws: ServerWebSocket<Connection>, notify = true): void {
     ws.data.turn?.abort();
     ws.data.turn = null;
-    ws.data.voiceJobId = null;
     clearCapture(ws);
-    for (const drain of ws.data.drains) drain();
-    ws.data.drains.clear();
     if (notify) send(ws, { type: "state", state: "idle" });
   }
 
@@ -152,22 +116,15 @@ export async function createPocketServer(
     const controller = ws.data.turn;
     const signal = AbortSignal.any([
       controller.signal,
-      AbortSignal.timeout(
-        config.matrix.enabled
-          ? config.matrix.replyTimeoutMs + config.requestTimeoutMs
-          : config.requestTimeoutMs,
-      ),
+      AbortSignal.timeout(config.requestTimeoutMs),
     ]);
     const chunks = ws.data.audio;
     const bytes = ws.data.audioBytes;
     clearCapture(ws);
     const current = () =>
       ws.data.turn === controller && !controller.signal.aborted && ws.readyState === 1;
-    let speaking = false;
     try {
       send(ws, { type: "state", state: "thinking" });
-      let transcript: string;
-      let reply: string;
       if (config.matrix.enabled) {
         if (!matrix)
           throw new PocketError("matrix_unconfigured", "Matrix voice is not configured yet.", 503);
@@ -184,115 +141,34 @@ export async function createPocketServer(
           ws.data.requestId ?? crypto.randomUUID(),
           audio,
         );
-        ws.data.voiceJobId = job.id;
         send(ws, { type: "voice_job", job });
-        reply = await matrix.waitForReply(
-          job.id,
-          AbortSignal.any([controller.signal, AbortSignal.timeout(config.matrix.replyTimeoutMs)]),
-        );
-        transcript = "Voice message sent to Beeper.";
-        if (!current()) return;
-        send(ws, { type: "transcript", text: transcript, final: true });
-      } else if (!voiceAdapter) {
-        if (adapter)
-          throw new PocketError("voice_unconfigured", "Connect Matrix to talk to Hermes.", 503);
-        await pause(450, signal);
-        transcript = "Demo: what should I focus on?";
-        send(ws, { type: "transcript", text: fitDeviceText(transcript), final: true });
-        const focus = store.snapshot().tasks.find((task) => task.id === store.snapshot().focusId);
-        reply = focus
-          ? `Demo preview. Your next focus is ${focus.title.toLowerCase()}. Connect Hermes to talk about your real tasks.`
-          : "Demo preview. All your example tasks are done. Connect Hermes to use your own tasks.";
-        await pause(550, signal);
+        await matrix.waitForSent(job.id, signal);
+      } else if (mode === "demo") {
+        await pause(700, signal);
       } else {
-        if (!stt)
-          throw new PocketError(
-            "speech_unconfigured",
-            "Speech is not configured yet. Add the Whisper model to talk to Hermes.",
-            503,
-          );
-        if (!bytes)
-          throw new PocketError(
-            "empty_audio",
-            "No audio was captured. Hold to talk and try again.",
-          );
-        const audio = new Uint8Array(bytes);
-        let offset = 0;
-        for (const chunk of chunks) {
-          audio.set(chunk, offset);
-          offset += chunk.length;
-        }
-        transcript = (
-          await stt.transcribe(audio, { sampleRate: 16000, channels: 1, signal })
-        ).text.trim();
-        if (!current()) return;
-        if (!transcript)
-          throw new PocketError("empty_audio", "I did not catch that. Please try again.");
-        send(ws, { type: "transcript", text: fitDeviceText(transcript), final: true });
-        reply = await voiceAdapter.chat(transcript, signal);
+        throw new PocketError(
+          "voice_unconfigured",
+          "Connect Matrix to send voice messages to Hermes.",
+          503,
+        );
       }
       if (!current()) return;
-      send(ws, { type: "reply", text: fitDeviceText(reply), final: true });
-      if (tts && (voiceAdapter || config.matrix.enabled)) {
-        speaking = true;
-        send(ws, { type: "state", state: "speaking" });
-        send(ws, {
-          type: "tts_start",
-          format: {
-            codec: "pcm_s16le",
-            sampleRate: tts.format.sampleRate,
-            channels: tts.format.channels,
-          },
-        });
-        let pendingByte: number | undefined;
-        for await (const chunk of tts.synthesize(reply, { signal })) {
-          if (!current()) return;
-          let frame = chunk;
-          if (pendingByte !== undefined) {
-            frame = new Uint8Array(chunk.byteLength + 1);
-            frame[0] = pendingByte;
-            frame.set(chunk, 1);
-            pendingByte = undefined;
-          }
-          // Subprocess stdout may split a PCM16 sample between two reads.
-          // Both clients expect each WebSocket frame to contain whole samples.
-          if (frame.byteLength % 2) {
-            pendingByte = frame[frame.byteLength - 1];
-            frame = frame.subarray(0, -1);
-          }
-          if (!frame.byteLength) continue;
-          const result = ws.send(frame);
-          if (result === -1) await waitForDrain(ws, signal);
-        }
-        if (pendingByte !== undefined) {
-          throw new PocketError(
-            "audio_invalid",
-            "The audio reply ended early. Please try again.",
-            502,
-          );
-        }
-      } else if (!voiceAdapter && !config.matrix.enabled) {
-        send(ws, { type: "state", state: "speaking" });
-        await pause(1800, signal);
-      } else {
-        // Text-only replies are successful turns too. Keep them visible long enough
-        // to read, and let a new press or cancel dismiss them immediately.
-        send(ws, { type: "state", state: "speaking" });
-        const readingTimeMs = Math.min(12000, Math.max(4000, reply.length * 55));
-        await pause(readingTimeMs, controller.signal);
-      }
-      if (adapter) void store.refresh(shutdown.signal).catch(() => undefined);
+      send(ws, { type: "state", state: "sent" });
+      await pause(1000, controller.signal);
     } catch (error) {
       if (current())
         fail(
           ws,
           signal.aborted
-            ? new PocketError("timeout", "That took too long. Please try again.", 504)
+            ? new PocketError(
+                "timeout",
+                "Still waiting for delivery. Check the recording status before sending it again.",
+                504,
+              )
             : error,
         );
     } finally {
       if (current()) {
-        if (speaking) send(ws, { type: "tts_end" });
         send(ws, { type: "state", state: "idle" });
         ws.data.turn = null;
       }
@@ -358,12 +234,10 @@ export async function createPocketServer(
           if (message.sampleRate !== 16000 || message.channels !== 1)
             throw new PocketError("audio_format", "Microphone audio must be 16 kHz mono PCM16.");
           cancel(ws, false);
-          if (adapter && !voiceAdapter && !config.matrix.enabled)
-            throw new PocketError("voice_unconfigured", "Connect Matrix to talk to Hermes.", 503);
-          if (voiceAdapter && !config.matrix.enabled && !stt)
+          if (mode === "live" && !config.matrix.enabled)
             throw new PocketError(
-              "speech_unconfigured",
-              "Speech is not configured yet. Add the Whisper model to talk to Hermes.",
+              "voice_unconfigured",
+              "Connect Matrix to send voice messages to Hermes.",
               503,
             );
           if (config.matrix.enabled && !matrix)
@@ -436,14 +310,12 @@ export async function createPocketServer(
                 authenticated,
                 deviceId: "",
                 requestId: null,
-                voiceJobId: null,
                 ready: false,
                 turn: null,
                 audio: [],
                 audioBytes: 0,
                 recording: false,
                 captureTimer: null,
-                drains: new Set(),
               },
             })
           )
@@ -457,23 +329,17 @@ export async function createPocketServer(
             requestTimeoutMs: config.requestTimeoutMs,
             voiceTransport: config.matrix.enabled
               ? "matrix"
-              : isLive(config)
-                ? "hermes"
-                : adapter
-                  ? "unconfigured"
-                  : "demo",
+              : mode === "live"
+                ? "unconfigured"
+                : "demo",
             matrix: config.matrix.enabled
               ? {
                   configured: Boolean(matrix),
                   ...(matrix?.status() ?? { ready: false, error: "matrix_unconfigured" }),
-                  replyTimeoutMs: config.matrix.replyTimeoutMs,
                 }
               : undefined,
             configured: {
-              hermes: isLive(config),
               todomate: Boolean(config.todomateBaseUrl && config.todomateAccessToken),
-              speechToText: Boolean(stt),
-              textToSpeech: Boolean(tts),
             },
           });
         }
@@ -520,22 +386,6 @@ export async function createPocketServer(
           if (!identifier(body.requestId))
             throw new PocketError("invalid_request", "A valid request ID is required.");
           return json(await store.complete(completion[1]!, body.requestId));
-        }
-        if (req.method === "POST" && url.pathname === "/api/chat") {
-          const body = await bodyObject(req);
-          if (typeof body.text !== "string" || !body.text.trim() || body.text.length > 2000)
-            throw new PocketError("invalid_request", "Send a message of 1 to 2000 characters.");
-          if (!voiceAdapter && mode === "live")
-            throw new PocketError(
-              "voice_unconfigured",
-              "Use a voice message through Matrix to talk to Hermes.",
-              503,
-            );
-          const text = voiceAdapter
-            ? await voiceAdapter.chat(body.text.trim(), req.signal)
-            : "This is a demo preview. Add your Hermes connection to chat with your cloud agent.";
-          if (adapter) void store.refresh(shutdown.signal).catch(() => undefined);
-          return json({ text, mode });
         }
         if (req.method === "GET" && url.pathname === "/app.js") {
           browserBundle ??= buildBrowser(config.webDirectory).catch((error: unknown) => {
@@ -607,10 +457,6 @@ export async function createPocketServer(
         }
         ws.data.audio.push(new Uint8Array(message));
       },
-      drain(ws) {
-        for (const done of ws.data.drains) done();
-        ws.data.drains.clear();
-      },
       close(ws) {
         cancel(ws, false);
         clients.delete(ws);
@@ -623,17 +469,7 @@ export async function createPocketServer(
   });
   const stopMatrixJobs = matrix?.subscribe((job) => {
     for (const ws of clients)
-      if (ws.data.ready && ws.data.deviceId === job.deviceId) {
-        send(ws, { type: "voice_job", job });
-        if (
-          job.state === "replied" &&
-          job.reply &&
-          ws.data.voiceJobId === job.id &&
-          ws.data.turn &&
-          !ws.data.turn.signal.aborted
-        )
-          send(ws, { type: "reply", text: fitDeviceText(job.reply), final: true });
-      }
+      if (ws.data.ready && ws.data.deviceId === job.deviceId) send(ws, { type: "voice_job", job });
   });
   const stopMatrixStatus = matrix?.subscribeStatus(() => {
     for (const ws of clients)
@@ -703,20 +539,6 @@ function pause(ms: number, signal: AbortSignal): Promise<void> {
     };
     signal.addEventListener("abort", abort, { once: true });
     if (signal.aborted) abort();
-  });
-}
-
-async function waitForDrain(ws: ServerWebSocket<Connection>, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return;
-  await new Promise<void>((resolve) => {
-    const done = () => {
-      ws.data.drains.delete(done);
-      signal.removeEventListener("abort", done);
-      resolve();
-    };
-    ws.data.drains.add(done);
-    signal.addEventListener("abort", done, { once: true });
-    if (signal.aborted) done();
   });
 }
 
@@ -795,9 +617,5 @@ async function readPcmRequest(req: Request): Promise<Uint8Array> {
 }
 
 function requiresToken(config: PocketConfig): boolean {
-  return (
-    config.matrix.enabled ||
-    Boolean(config.todomateBaseUrl && config.todomateAccessToken) ||
-    isLive(config)
-  );
+  return config.matrix.enabled || Boolean(config.todomateBaseUrl && config.todomateAccessToken);
 }

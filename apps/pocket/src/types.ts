@@ -12,6 +12,12 @@ export interface TaskList {
   focusId: string | null;
 }
 
+export interface TaskAdapter {
+  readonly authoritativeCompletions?: boolean;
+  readTasks(signal?: AbortSignal): Promise<TaskList>;
+  completeTask(task: FocusTask, requestId: string, signal?: AbortSignal): Promise<TaskList>;
+}
+
 export interface FocusSnapshot extends TaskList {
   revision: number;
   mode: "demo" | "live";

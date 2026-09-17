@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import type { MatrixConfig } from "./config";
 import { identifier, PocketError } from "./types";
 
-export type VoiceJobState = "queued" | "sending" | "sent" | "replied" | "failed";
+export type VoiceJobState = "queued" | "sending" | "sent" | "failed";
 export interface VoiceJob {
   id: string;
   deviceId: string;
@@ -13,7 +13,6 @@ export interface VoiceJob {
   createdAt: number;
   updatedAt: number;
   matrixEventId: string | null;
-  reply: string | null;
   error: string | null;
 }
 interface JobRow extends VoiceJob {
@@ -28,7 +27,6 @@ export type MatrixWorkerEvent =
   | { type: "retry"; jobId: string; code: string }
   | { type: "offline"; code: string }
   | { type: "sent"; jobId: string; eventId: string }
-  | { type: "reply"; jobId: string; eventId: string; text: string }
   | { type: "failed"; jobId: string; code: string };
 export interface MatrixTransport {
   start(receive: (event: MatrixWorkerEvent) => void): void;
@@ -92,10 +90,7 @@ export class PythonMatrixTransport implements MatrixTransport {
               event.type === "ready" ||
               event.type === "identity" ||
               event.type === "offline" ||
-              ((event.type === "sent" ||
-                event.type === "reply" ||
-                event.type === "retry" ||
-                event.type === "failed") &&
+              ((event.type === "sent" || event.type === "retry" || event.type === "failed") &&
                 identifier(event.jobId))
             ) {
               if (event.type === "offline") lastProblem = safeCode(event.code);
@@ -154,13 +149,22 @@ export class MatrixVoiceService {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     await chmod(this.directory, 0o700);
     this.database = new Database(resolve(this.directory, "jobs.sqlite"), { create: true });
-    this.database.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+    this.database.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;
       CREATE TABLE IF NOT EXISTS jobs (
         id TEXT PRIMARY KEY, deviceId TEXT NOT NULL, requestKey TEXT NOT NULL, audioHash TEXT NOT NULL,
         audioPath TEXT NOT NULL, durationMs INTEGER NOT NULL, state TEXT NOT NULL,
-        createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, matrixEventId TEXT, reply TEXT, error TEXT,
+        createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, matrixEventId TEXT, error TEXT,
         UNIQUE(deviceId, requestKey)
       );`);
+    // Remove message history from older two-way bridge stores.
+    this.database.exec("UPDATE jobs SET state='sent' WHERE state='replied'");
+    const columns = this.database.query<{ name: string }, []>("PRAGMA table_info(jobs)").all();
+    if (columns.some((column) => column.name === "reply"))
+      this.database.exec("ALTER TABLE jobs DROP COLUMN reply");
+    for (const row of this.database
+      .query<{ audioPath: string }, []>("SELECT audioPath FROM jobs WHERE state='sent'")
+      .all())
+      await unlink(row.audioPath).catch(() => undefined);
     await chmod(resolve(this.directory, "jobs.sqlite"), 0o600);
     this.transport.start((event) => this.receive(event));
   }
@@ -202,7 +206,7 @@ export class MatrixVoiceService {
       }
       const pending = db
         .query<{ count: number }, []>(
-          "SELECT count(*) AS count FROM jobs WHERE state IN ('queued','sending','sent')",
+          "SELECT count(*) AS count FROM jobs WHERE state IN ('queued','sending')",
         )
         .get()!.count;
       if (pending >= 32)
@@ -275,18 +279,18 @@ export class MatrixVoiceService {
     return () => this.subscribers.delete(listener);
   }
 
-  waitForReply(id: string, signal: AbortSignal): Promise<string> {
+  waitForSent(id: string, signal: AbortSignal): Promise<VoiceJob> {
     return new Promise((resolve, reject) => {
       let unsubscribe = () => {};
-      const finish = (error?: Error, text?: string) => {
+      const finish = (error?: Error, job?: VoiceJob) => {
         unsubscribe();
         signal.removeEventListener("abort", abort);
         if (error) reject(error);
-        else resolve(text!);
+        else resolve(job!);
       };
       const check = (job: VoiceJob | null) => {
         if (!job || job.id !== id) return;
-        if (job.state === "replied" && job.reply) finish(undefined, job.reply);
+        if (job.state === "sent") finish(undefined, job);
         else if (job.state === "failed")
           finish(
             new PocketError(
@@ -300,7 +304,7 @@ export class MatrixVoiceService {
         finish(
           new PocketError(
             "cancelled",
-            "Stopped waiting. Your message remains available in Beeper.",
+            "Stopped waiting. The recording remains queued for delivery.",
             499,
           ),
         );
@@ -345,7 +349,7 @@ export class MatrixVoiceService {
       .get(event.jobId);
     if (!row) return;
     if (event.type === "retry") {
-      if (row.state === "replied" || row.state === "failed" || this.retries.has(row.id)) return;
+      if (row.state === "sent" || row.state === "failed" || this.retries.has(row.id)) return;
       this.database
         .query("UPDATE jobs SET state='queued',error=?,updatedAt=? WHERE id=?")
         .run(safeCode(event.code), Date.now(), row.id);
@@ -366,21 +370,10 @@ export class MatrixVoiceService {
       event.eventId.startsWith("$")
     ) {
       this.database
-        .query(
-          "UPDATE jobs SET state=CASE WHEN state='replied' THEN state ELSE 'sent' END, matrixEventId=?, error=NULL, updatedAt=? WHERE id=?",
-        )
+        .query("UPDATE jobs SET state='sent',matrixEventId=?,error=NULL,updatedAt=? WHERE id=?")
         .run(event.eventId, Date.now(), row.id);
-    } else if (
-      event.type === "reply" &&
-      typeof event.text === "string" &&
-      event.text.trim() &&
-      event.text.length <= 32000
-    ) {
-      this.database
-        .query("UPDATE jobs SET state='replied',reply=?,error=NULL,updatedAt=? WHERE id=?")
-        .run(event.text, Date.now(), row.id);
       void unlink(row.audioPath).catch(() => undefined);
-    } else if (event.type === "failed" && row.state !== "replied") {
+    } else if (event.type === "failed" && row.state !== "sent") {
       this.database
         .query("UPDATE jobs SET state='failed',error=?,updatedAt=? WHERE id=?")
         .run(safeCode(event.code), Date.now(), row.id);
@@ -392,7 +385,7 @@ export class MatrixVoiceService {
     if (!this.active || !this.database || this.stopped) return;
     const rows = this.database
       .query<JobRow, []>(
-        "SELECT * FROM jobs WHERE state IN ('queued','sending','sent') OR id IN (SELECT id FROM jobs WHERE state='replied' ORDER BY updatedAt DESC LIMIT 20) ORDER BY createdAt",
+        "SELECT * FROM jobs WHERE state IN ('queued','sending') ORDER BY createdAt",
       )
       .all();
     for (const row of rows) {
@@ -435,7 +428,6 @@ function publicJob(row: JobRow): VoiceJob {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     matrixEventId: row.matrixEventId,
-    reply: row.reply,
     error: row.error,
   };
 }

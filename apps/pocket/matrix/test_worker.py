@@ -1,6 +1,8 @@
 """Offline protocol, encryption and durability regressions; no network clients are started."""
 import asyncio
 import io
+import json
+import sqlite3
 import tempfile
 import unittest
 import wave
@@ -68,63 +70,96 @@ class JournalTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.path = Path(self.directory.name) / "journal.sqlite"
         self.journal = Journal(self.path)
-        self.journal.register("job-a", "hash-a")
-        self.journal.sent("job-a", "$sent-a")
-        self.journal.register("job-b", "hash-b")
-        self.journal.sent("job-b", "$sent-b")
+        self.content = {"msgtype": "m.audio", "body": "Voice message", "file": {
+            "url": "mxc://example.test/encrypted-upload", "key": {"k": "fixture-attachment-key"},
+            "iv": "fixture-iv", "hashes": {"sha256": "fixture-hash"}, "v": "v2",
+        }}
 
     def tearDown(self):
         self.journal.db.close()
         self.directory.cleanup()
 
-    def accept(self, event="$reply-a", body="Answer", relation=None, **changes):
-        args = dict(room_id="!room:example.test", sender="@h:example.test", event_id=event,
-            content={"msgtype": "m.text", "body": body, "m.relates_to": relation or {"m.in_reply_to": {"event_id": "$sent-a"}}},
-            decrypted=True, verified=True, expected_room="!room:example.test", expected_sender="@h:example.test")
-        args.update(changes)
-        return self.journal.accept_reply(**args)
-
-    def test_sender_room_encryption_verification_and_relation_required(self):
-        for change in ({"sender": "@other:example.test"}, {"room_id": "!other:example.test"}, {"decrypted": False}, {"verified": False}):
-            self.assertIsNone(self.accept(**change))
-        self.assertIsNone(self.accept(relation={"event_id": "$sent-a"}))
-        self.assertIsNone(self.accept(relation={"rel_type": "m.thread", "event_id": "$sent-a", "m.in_reply_to": {"event_id": "$sent-b"}}))
-        self.assertIsNone(self.journal.job("job-a")["reply"])
-
-    def test_thread_followup_and_edit_are_durable_idempotent(self):
-        first = self.accept(relation={"rel_type": "m.thread", "event_id": "$sent-a"})
-        self.assertEqual(first["jobId"], "job-a")
-        self.assertIsNone(self.accept())
-        second = self.accept(event="$reply-b", body="Second part", relation={"m.in_reply_to": {"event_id": "$reply-a"}})
-        self.assertEqual(second["text"], "Answer\n\nSecond part")
-        edited = self.accept(event="$edit", content={"msgtype": "m.text", "body": "* Correction", "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply-a"}, "m.new_content": {"msgtype": "m.text", "body": "Correction"}})
-        self.assertEqual(edited["text"], "Correction\n\nSecond part")
-        self.journal.save_cursor("cursor-after-durable-handling")
+    def reopen(self):
         self.journal.db.close()
         self.journal = Journal(self.path)
-        self.assertEqual(self.journal.cursor(), "cursor-after-durable-handling")
-        self.assertEqual(self.journal.job("job-a")["reply"], "Correction\n\nSecond part")
-        with self.assertRaises(BridgeError):
-            self.journal.register("job-a", "different-audio")
 
-    def test_reply_before_send_ack_survives_restart(self):
-        content = {"msgtype": "m.text", "body": "Recovered", "m.relates_to": {"m.in_reply_to": {"event_id": "$future"}}}
-        args = ("!room:example.test", "@h:example.test", "$early", content, True, True)
-        self.journal.remember(args)
-        self.assertIsNone(self.journal.accept_reply(*args, "!room:example.test", "@h:example.test"))
-        self.journal.db.close()
-        self.journal = Journal(self.path)
-        self.journal.register("job-c", "hash-c")
-        self.journal.sent("job-c", "$future")
-        buffered = self.journal.buffered()
-        self.assertEqual(len(buffered), 1)
-        reply = self.journal.accept_reply(*buffered[0], "!room:example.test", "@h:example.test")
-        self.assertEqual(reply["jobId"], "job-c")
-        self.assertEqual(self.journal.buffered(), [])
+    def test_pending_upload_content_survives_restart_before_send_ack(self):
+        first = self.journal.register("transaction-a", "audio-hash-a")
+        created = first["created_at"]
+        self.journal.content("transaction-a", self.content)
+        self.reopen()
+        recovered = self.journal.register("transaction-a", "audio-hash-a")
+        self.assertEqual(recovered["id"], "transaction-a")
+        self.assertEqual(recovered["created_at"], created)
+        self.assertIsNone(recovered["event_id"])
+        self.assertEqual(json.loads(recovered["content"]), self.content)
+        self.assertEqual(self.journal.db.execute("SELECT count(*) FROM deliveries").fetchone()[0], 1)
 
-    def test_audio_reply_returns_explicit_notice(self):
-        result = self.accept(content={"msgtype": "m.audio", "body": "reply.ogg", "m.relates_to": {"m.in_reply_to": {"event_id": "$sent-a"}}})
-        self.assertIn("Open Beeper to listen", result["text"])
+    def test_sent_receipt_and_transaction_are_durable_and_idempotent(self):
+        self.journal.register("transaction-a", "audio-hash-a")
+        self.journal.content("transaction-a", self.content)
+        self.journal.sent("transaction-a", "$matrix-event-a")
+        self.reopen()
+        for _ in range(3):
+            recovered = self.journal.register("transaction-a", "audio-hash-a")
+            self.assertEqual(recovered["event_id"], "$matrix-event-a")
+            self.assertEqual(json.loads(recovered["content"]), self.content)
+        self.journal.register("transaction-b", "audio-hash-b")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.journal.sent("transaction-b", "$matrix-event-a")
+        self.assertIsNone(self.journal.job("transaction-b")["event_id"])
+        self.assertEqual(self.journal.job("transaction-a")["event_id"], "$matrix-event-a")
+
+    def test_reused_transaction_rejects_different_audio_after_restart(self):
+        self.journal.register("transaction-a", "audio-hash-a")
+        self.journal.content("transaction-a", self.content)
+        self.journal.sent("transaction-a", "$matrix-event-a")
+        self.reopen()
+        with self.assertRaises(BridgeError) as caught:
+            self.journal.register("transaction-a", "different-audio-hash")
+        self.assertEqual(caught.exception.code, "request_conflict")
+        original = self.journal.job("transaction-a")
+        self.assertEqual(original["audio_hash"], "audio-hash-a")
+        self.assertEqual(original["event_id"], "$matrix-event-a")
+        self.assertEqual(json.loads(original["content"]), self.content)
+
+    def test_legacy_reply_state_is_removed_without_losing_sent_receipts(self):
+        legacy_path = Path(self.directory.name) / "legacy.sqlite"
+        legacy = sqlite3.connect(legacy_path)
+        legacy.executescript("""
+            CREATE TABLE deliveries (
+                id TEXT PRIMARY KEY, audio_hash TEXT NOT NULL, created_at INTEGER NOT NULL,
+                content TEXT, event_id TEXT UNIQUE, reply TEXT
+            );
+            CREATE TABLE replies (event_id TEXT PRIMARY KEY, job_id TEXT, body TEXT, sequence INTEGER);
+            CREATE TABLE inbox (event_id TEXT PRIMARY KEY, payload TEXT);
+            CREATE TABLE seen_events (event_id TEXT PRIMARY KEY);
+            CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
+            INSERT INTO replies VALUES ('$incoming', 'transaction-a', 'old received message', 1);
+            INSERT INTO inbox VALUES ('$buffered', 'old buffered message');
+            INSERT INTO seen_events VALUES ('$incoming');
+            INSERT INTO metadata VALUES ('sync_cursor', 'old-cursor');
+        """)
+        legacy.execute("INSERT INTO deliveries VALUES (?,?,?,?,?,?)", (
+            "transaction-a", "audio-hash-a", 123456, json.dumps(self.content),
+            "$matrix-event-a", "old received message",
+        ))
+        legacy.commit()
+        legacy.close()
+        migrated = Journal(legacy_path)
+        try:
+            row = migrated.job("transaction-a")
+            self.assertEqual(row["audio_hash"], "audio-hash-a")
+            self.assertEqual(row["created_at"], 123456)
+            self.assertEqual(row["event_id"], "$matrix-event-a")
+            self.assertEqual(json.loads(row["content"]), self.content)
+            if "reply" in row.keys():
+                self.assertIsNone(row["reply"])
+            tables = {row[0] for row in migrated.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            self.assertTrue(tables.isdisjoint({"replies", "inbox", "seen_events", "metadata"}))
+            self.assertEqual(migrated.register("transaction-a", "audio-hash-a")["event_id"], "$matrix-event-a")
+        finally:
+            migrated.db.close()
 
 
 if __name__ == "__main__":

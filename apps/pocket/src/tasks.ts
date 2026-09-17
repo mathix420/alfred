@@ -1,6 +1,6 @@
 import { mkdir, rename, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { HermesAdapter } from "./hermes";
+import type { TaskAdapter } from "./types";
 import {
   identifier,
   parseTaskList,
@@ -84,7 +84,7 @@ export class TaskStore {
   private readonly listeners = new Set<(snapshot: FocusSnapshot) => void>();
 
   constructor(
-    private readonly adapter: HermesAdapter | null,
+    private readonly adapter: TaskAdapter | null,
     private readonly dataFile: string | null,
     initialMode: "demo" | "live" = adapter ? "live" : "demo",
   ) {

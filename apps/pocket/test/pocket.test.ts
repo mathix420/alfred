@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { MatrixVoiceService } from "../src/matrix";
+import { authenticatedSocket, TestMatrixTransport } from "./fixtures/matrix-transport";
 import { loadPocketConfig } from "../src/config";
-import { HttpHermesAdapter, type HermesAdapter, type HermesFetch } from "../src/hermes";
+import type { TaskAdapter } from "../src/types";
 import { createPocketServer, type PocketApplication } from "../src/server";
 import { demoTasks, TaskStore } from "../src/tasks";
 import { parseTaskList, type TaskList } from "../src/types";
@@ -25,7 +27,25 @@ async function start(
   return app;
 }
 
-function fakeAdapter(overrides: Partial<HermesAdapter> = {}): HermesAdapter {
+async function startMatrix(
+  overrides: Parameters<typeof createPocketServer>[1] = {},
+  autoAcknowledge = true,
+) {
+  const directory = await mkdtemp(join(tmpdir(), "pocket-matrix-voice-"));
+  temporary.push(directory);
+  const transport = new TestMatrixTransport(autoAcknowledge);
+  const matrix = new MatrixVoiceService(directory, transport);
+  const settings = {
+    ...config(),
+    deviceToken: "test-token",
+    matrix: { ...config().matrix, enabled: true },
+  };
+  const app = await createPocketServer(settings, { poll: false, matrix, ...overrides });
+  applications.push(app);
+  return { app, transport };
+}
+
+function fakeAdapter(overrides: Partial<TaskAdapter> = {}): TaskAdapter {
   return {
     readTasks: async () => demoTasks(),
     completeTask: async (task) => {
@@ -36,7 +56,6 @@ function fakeAdapter(overrides: Partial<HermesAdapter> = {}): HermesAdapter {
       list.focusId = list.tasks.find((item) => !item.completed)?.id ?? null;
       return list;
     },
-    chat: async () => "A real reply from the test adapter.",
     ...overrides,
   };
 }
@@ -51,7 +70,7 @@ describe("pocket configuration and validation", () => {
       mode: "demo",
       requestTimeoutMs: 60000,
       voiceTransport: "demo",
-      configured: { hermes: false, todomate: false, speechToText: false, textToSpeech: false },
+      configured: { todomate: false },
     });
     const snapshot = await (await fetch(`${base(app)}/api/focus`)).json();
     expect(snapshot.mode).toBe("demo");
@@ -62,7 +81,7 @@ describe("pocket configuration and validation", () => {
   it("rejects malformed ports, credential-bearing URLs, and invalid focus references", () => {
     expect(() => loadPocketConfig({ ALFRED_POCKET_PORT: "2e3" })).toThrow();
     expect(() =>
-      loadPocketConfig({ ALFRED_HERMES_BASE_URL: "https://user:secret@example.com" }),
+      loadPocketConfig({ ALFRED_TODOMATE_API_URL: "https://user:secret@example.com" }),
     ).toThrow();
     expect(() => parseTaskList({ ...demoTasks(), focusId: "not-a-task" })).toThrow();
     const duplicate = demoTasks();
@@ -73,20 +92,21 @@ describe("pocket configuration and validation", () => {
   it("rejects cross-origin mutations and does not leak unknown upstream errors", async () => {
     const app = await start({
       adapter: fakeAdapter({
-        chat: async () => {
+        completeTask: async () => {
           throw new Error("Bearer secret-should-not-leak");
         },
       }),
     });
-    const rejected = await fetch(`${base(app)}/api/chat`, {
+    await app.store.refresh();
+    const rejected = await fetch(`${base(app)}/api/tasks/investor-demo/complete`, {
       method: "POST",
       headers: { Origin: "https://evil.example" },
-      body: JSON.stringify({ text: "hello" }),
+      body: JSON.stringify({ requestId: "safe-error" }),
     });
     expect(rejected.status).toBe(403);
-    const failed = await fetch(`${base(app)}/api/chat`, {
+    const failed = await fetch(`${base(app)}/api/tasks/investor-demo/complete`, {
       method: "POST",
-      body: JSON.stringify({ text: "hello" }),
+      body: JSON.stringify({ requestId: "safe-error" }),
     });
     expect(failed.status).toBe(503);
     expect(await failed.text()).not.toContain("secret-should-not-leak");
@@ -155,7 +175,7 @@ describe("task completion and persistence", () => {
     expect(store.snapshot().focusId).toBe("term-sheet");
   });
 
-  it("keeps tasks when Hermes completion fails", async () => {
+  it("keeps tasks when upstream completion fails", async () => {
     const store = new TaskStore(
       fakeAdapter({
         completeTask: async () => {
@@ -180,56 +200,6 @@ describe("task completion and persistence", () => {
   });
 });
 
-describe("Hermes adapter", () => {
-  it("uses the official authenticated chat endpoint and validates persisted completion", async () => {
-    const requests: Request[] = [];
-    let payload: unknown = demoTasks();
-    const fetcher = (async (url: string | URL | Request, init?: RequestInit) => {
-      requests.push(new Request(url, init));
-      return Response.json({ choices: [{ message: { content: JSON.stringify(payload) } }] });
-    }) as HermesFetch;
-    const adapter = new HttpHermesAdapter(
-      { ...config(), hermesBaseUrl: "https://hermes.example/v1", hermesApiKey: "test-secret" },
-      fetcher,
-    );
-    await adapter.readTasks();
-    expect(requests[0]?.url).toBe("https://hermes.example/v1/chat/completions");
-    expect(requests[0]?.headers.get("authorization")).toBe("Bearer test-secret");
-    await expect(adapter.completeTask(demoTasks().tasks[0]!, "request-1")).rejects.toThrow(
-      "confirm",
-    );
-    const list = await fakeAdapter().completeTask(demoTasks().tasks[0]!, "request-1");
-    payload = { ...list, persisted: true, completedTaskId: "investor-demo" };
-    expect(
-      (await adapter.completeTask(demoTasks().tasks[0]!, "request-1")).tasks[0]?.completed,
-    ).toBe(true);
-  });
-
-  it("sanitizes provider error bodies and cancels HTTP work", async () => {
-    const failing = new HttpHermesAdapter(
-      { ...config(), hermesBaseUrl: "https://hermes.example", hermesApiKey: "test-secret" },
-      (async () => new Response("secret provider trace", { status: 500 })) as HermesFetch,
-    );
-    await expect(failing.chat("hello")).rejects.toThrow("Hermes is unavailable");
-    let aborted = false;
-    const cancellable = new HttpHermesAdapter(
-      { ...config(), hermesBaseUrl: "https://hermes.example", hermesApiKey: "test-secret" },
-      (async (_url: unknown, init?: RequestInit) =>
-        new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener("abort", () => {
-            aborted = true;
-            reject(new Error("aborted"));
-          });
-        })) as HermesFetch,
-    );
-    const controller = new AbortController();
-    const pending = cancellable.chat("hello", controller.signal);
-    controller.abort();
-    await expect(pending).rejects.toThrow("cancelled");
-    expect(aborted).toBe(true);
-  });
-});
-
 interface Connection {
   ws: WebSocket;
   messages: Record<string, unknown>[];
@@ -237,8 +207,9 @@ interface Connection {
   waitFor(predicate: (messages: Record<string, unknown>[]) => boolean): Promise<void>;
 }
 
-async function connect(app: PocketApplication): Promise<Connection> {
-  const ws = new WebSocket(`${base(app).replace("http", "ws")}/ws`);
+async function connect(app: PocketApplication, token?: string): Promise<Connection> {
+  const url = `${base(app).replace("http", "ws")}/ws`;
+  const ws = token ? authenticatedSocket(url, token) : new WebSocket(url);
   ws.binaryType = "arraybuffer";
   const messages: Record<string, unknown>[] = [];
   const audio: Uint8Array[] = [];
@@ -284,89 +255,103 @@ describe("pocket WebSocket", () => {
     client.ws.close();
   });
 
-  it("cancel aborts active transcription without emitting a late reply", async () => {
-    let started = false;
-    let aborted = false;
-    const app = await start({
-      adapter: fakeAdapter(),
-      stt: {
-        transcribe: async (_audio, options) => {
-          started = true;
-          return new Promise((_resolve, reject) =>
-            options.signal?.addEventListener("abort", () => {
-              aborted = true;
-              reject(new Error("aborted"));
-            }),
-          );
-        },
-      },
-    });
-    const client = await connect(app);
+  it("cancel stops the active wait while recording delivery continues", async () => {
+    const { app, transport } = await startMatrix({}, false);
+    const client = await connect(app, "test-token");
     send(client, { type: "hello", protocol: 2, deviceId: "test-device" });
     send(client, { type: "ptt_down", sampleRate: 16000, channels: 1 });
     client.ws.send(new Uint8Array([0, 0, 0, 0]));
     send(client, { type: "ptt_up" });
-    await client.waitFor(() => started);
+    await client.waitFor(() => transport.submitted.length === 1);
     send(client, { type: "cancel" });
-    await client.waitFor(() => aborted);
-    expect(client.messages.some((frame) => frame.type === "reply")).toBe(false);
-    expect(client.messages.at(-1)?.state).toBe("idle");
+    await client.waitFor((frames) => frames.some((frame) => frame.state === "idle"));
+    transport.confirm(transport.submitted[0]!.id);
+    await client.waitFor((frames) =>
+      frames.some(
+        (frame) => frame.type === "voice_job" && (frame.job as { state?: string }).state === "sent",
+      ),
+    );
+    expect(client.messages.some((frame) => frame.state === "sent")).toBe(false);
     client.ws.close();
   });
 
-  it("keeps a successful live text-only voice reply visible until cancelled", async () => {
-    const app = await start({
-      adapter: fakeAdapter(),
-      stt: { transcribe: async () => ({ text: "What should I do next?" }) },
-    });
-    const client = await connect(app);
-    send(client, { type: "hello", protocol: 2, deviceId: "text-only-device" });
+  it("shows Sent only after the homeserver acknowledgement, then returns to idle", async () => {
+    const { app, transport } = await startMatrix({}, false);
+    const client = await connect(app, "test-token");
+    send(client, { type: "hello", protocol: 2, deviceId: "receipt-device" });
     send(client, { type: "ptt_down", sampleRate: 16000, channels: 1 });
     client.ws.send(new Uint8Array([0, 0, 0, 0]));
     send(client, { type: "ptt_up" });
-    await client.waitFor((frames) => frames.some((frame) => frame.state === "speaking"));
-    await Bun.sleep(75);
-    expect(
-      client.messages.some(
-        (frame) =>
-          frame.type === "reply" &&
-          frame.final === true &&
-          frame.text === "A real reply from the test adapter.",
-      ),
-    ).toBe(true);
-    expect(client.messages.some((frame) => frame.type === "error")).toBe(false);
-    expect(client.messages.some((frame) => frame.state === "idle")).toBe(false);
-    send(client, { type: "cancel" });
+    await client.waitFor(() => transport.submitted.length === 1);
+    expect(client.messages.some((frame) => frame.state === "sent")).toBe(false);
+    transport.confirm(transport.submitted[0]!.id);
+    await client.waitFor((frames) => frames.some((frame) => frame.state === "sent"));
     await client.waitFor((frames) => frames.some((frame) => frame.state === "idle"));
+    expect(
+      client.messages.some((frame) => frame.type === "reply" || frame.type === "transcript"),
+    ).toBe(false);
     expect(client.messages.at(-1)?.state).toBe("idle");
     client.ws.close();
   });
 
-  it("preserves PCM16 samples across arbitrary TTS subprocess chunks", async () => {
-    const app = await start({
-      adapter: fakeAdapter(),
-      stt: { transcribe: async () => ({ text: "hello" }) },
-      tts: {
-        format: { encoding: "pcm_s16le", sampleRate: 22050, channels: 1 },
-        synthesize: async function* () {
-          yield new Uint8Array([1]);
-          yield new Uint8Array([2, 3, 4]);
-        },
-      },
-    });
-    const client = await connect(app);
-    send(client, { type: "hello", protocol: 2, deviceId: "audio-device" });
+  it("uploads original PCM to Matrix without transcription, chat conversion, or synthesized audio", async () => {
+    const { app, transport } = await startMatrix({}, false);
+    const client = await connect(app, "test-token");
+    send(client, { type: "hello", protocol: 2, deviceId: "raw-audio-device" });
     send(client, { type: "ptt_down", sampleRate: 16000, channels: 1 });
-    client.ws.send(new Uint8Array([0, 0]));
+    client.ws.send(new Uint8Array([1, 2]));
+    client.ws.send(new Uint8Array([3, 4, 5, 6]));
     send(client, { type: "ptt_up" });
-    await client.waitFor((frames) => frames.some((frame) => frame.type === "tts_end"));
-    expect(client.audio.map((chunk) => [...chunk])).toEqual([[1, 2, 3, 4]]);
-    expect(client.messages.find((frame) => frame.type === "tts_start")?.format).toEqual({
-      codec: "pcm_s16le",
-      sampleRate: 22050,
-      channels: 1,
+    await client.waitFor(() => transport.submitted.length === 1);
+    const job = transport.submitted[0]!;
+    expect([...new Uint8Array(await Bun.file(job.path).arrayBuffer())]).toEqual([1, 2, 3, 4, 5, 6]);
+    transport.confirm(job.id);
+    await client.waitFor((frames) => frames.some((frame) => frame.state === "sent"));
+    expect(
+      client.messages.some((frame) => frame.type === "reply" || frame.type === "transcript"),
+    ).toBe(false);
+    expect(
+      client.messages.some((frame) => frame.type === "tts_start" || frame.type === "tts_end"),
+    ).toBe(false);
+    expect(client.audio).toEqual([]);
+    send(client, { type: "cancel" });
+    client.ws.close();
+  });
+
+  it("requires Matrix for real voice even when legacy speech environment variables are present", async () => {
+    const settings = loadPocketConfig({
+      ALFRED_TODOMATE_API_URL: "https://tasks.example",
+      TODOMATE_MCP_ACCESS_TOKEN: "test-key",
+      ALFRED_DEVICE_TOKEN: "test-token",
+      ALFRED_STT_MODEL: "/unused/whisper.bin",
+      ALFRED_STT_BINARY: "/unused/whisper",
+      ALFRED_TTS_MODEL: "/unused/piper.onnx",
+      ALFRED_TTS_BINARY: "/unused/piper",
     });
-    expect(client.messages.some((frame) => frame.type === "error")).toBe(false);
+    const app = await createPocketServer(
+      { ...settings, port: 0, dataFile: null },
+      { adapter: fakeAdapter(), poll: false },
+    );
+    applications.push(app);
+    const status = await (
+      await fetch(`${base(app)}/api/status`, { headers: { Authorization: "Bearer test-token" } })
+    ).json();
+    expect(status.voiceTransport).toBe("unconfigured");
+    expect(status.configured).toEqual({ todomate: true });
+    expect(
+      (
+        await fetch(`${base(app)}/api/chat`, {
+          method: "POST",
+          headers: { Authorization: "Bearer test-token" },
+          body: JSON.stringify({ text: "No chat route" }),
+        })
+      ).status,
+    ).toBe(404);
+    const client = await connect(app, "test-token");
+    send(client, { type: "hello", protocol: 2, deviceId: "legacy-device" });
+    send(client, { type: "ptt_down", sampleRate: 16000, channels: 1 });
+    await client.waitFor((frames) => frames.some((frame) => frame.code === "voice_unconfigured"));
+    expect(client.messages.some((frame) => frame.state === "listening")).toBe(false);
     client.ws.close();
   });
 
