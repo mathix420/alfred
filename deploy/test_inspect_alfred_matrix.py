@@ -49,6 +49,39 @@ class Fixtures:
 
 
 class InspectorTests(unittest.TestCase):
+    def test_missing_homeserver_explains_console_environment_without_network(self):
+        for value in (None, "", " \t\r\n"):
+            env, transport = environment(), Fixtures()
+            if value is None:
+                del env["ALFRED_MATRIX_HOMESERVER"]
+            else:
+                env["ALFRED_MATRIX_HOMESERVER"] = value
+            with self.assertRaisesRegex(inspector.InspectionError, "^alfred_homeserver_missing$"):
+                inspector.inspect(env, transport)
+            self.assertEqual(transport.requests, [])
+        err = io.StringIO()
+        with patch.dict(inspector.os.environ, {}, clear=True), redirect_stderr(err):
+            self.assertEqual(inspector.main([]), 1)
+        self.assertIn("Alfred container's console", err.getvalue())
+        self.assertIn("ALFRED_MATRIX_HOMESERVER", err.getvalue())
+
+    def test_homeserver_whitespace_matches_application_normalization(self):
+        env, transport = environment(), Fixtures()
+        env["ALFRED_MATRIX_HOMESERVER"] = " \thttps://matrix.example.test///\r\n"
+        inspector.inspect(env, transport)
+        self.assertEqual(transport.requests[0].full_url,
+                         "https://matrix.example.test/_matrix/client/v3/account/whoami")
+
+    def test_invalid_homeserver_diagnostic_does_not_echo_value(self):
+        for value in ('"https://matrix.example.test"', 'https://user:private-fixture-token@matrix.example.test'):
+            env, err = environment(), io.StringIO()
+            env["ALFRED_MATRIX_HOMESERVER"] = value
+            with patch.dict(inspector.os.environ, env, clear=True), redirect_stderr(err):
+                self.assertEqual(inspector.main([]), 1)
+            self.assertIn("https_homeserver_required", err.getvalue())
+            self.assertNotIn(value, err.getvalue())
+            self.assertNotIn("private-fixture-token", err.getvalue())
+
     def test_current_hermes_only_pins_explain_unreadable_own_clients(self):
         transport = Fixtures()
         report = inspector.inspect(environment(), transport)

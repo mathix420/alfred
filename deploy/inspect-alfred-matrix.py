@@ -47,6 +47,11 @@ def fingerprint(value):
 
 
 def homeserver_url(value):
+    # Match the application's config normalization, including pasted whitespace.
+    if isinstance(value, str):
+        value = value.strip()
+    if value is None or value == "":
+        raise InspectionError("alfred_homeserver_missing")
     if not safe_text(value, 2048):
         raise InspectionError("https_homeserver_required")
     try:
@@ -203,6 +208,13 @@ def main(argv=None):
         report = inspect(os.environ)
     except InspectionError as error:
         print("Inspection failed: " + str(error), file=sys.stderr)
+        if str(error) == "alfred_homeserver_missing":
+            print("ALFRED_MATRIX_HOMESERVER is missing or empty in this console. "
+                  "Open the Alfred container's console in Portainer, not Hermes or the Docker host. "
+                  "The inspector needs that container's existing ALFRED_MATRIX_* environment.", file=sys.stderr)
+        elif str(error) == "https_homeserver_required":
+            print("ALFRED_MATRIX_HOMESERVER must be an HTTPS URL without enclosing quotes, "
+                  "credentials, query parameters, or a fragment. Its value was not printed.", file=sys.stderr)
         return 1
     except Exception:
         print("Inspection failed: unexpected_inspection_error", file=sys.stderr)
