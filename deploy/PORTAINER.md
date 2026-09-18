@@ -376,3 +376,45 @@ The ESP32 and browser need only the backend address and `ALFRED_DEVICE_TOKEN`.
 Record a short message when ready: the screen shows **Sent!** after the Matrix
 homeserver confirms delivery. The original recording appears as your user in the
 encrypted chat; Alfred does not process incoming chat or display Hermes replies.
+
+**If Hermes receives voice notes but Beeper shows “Encrypted message”**
+
+The trust list must include the Beeper devices where you listen, as well as
+Hermes. A list containing only Hermes deliberately withholds message keys from
+your phone and desktop. Adding Alfred's own sender device does not grant your
+other clients access.
+
+In the **Alfred container's Portainer console**, run this read-only inspector:
+
+```bash
+python - <<'PY'
+from pathlib import Path
+import runpy
+import tempfile
+import urllib.request
+
+with tempfile.TemporaryDirectory(prefix="alfred-matrix-inspect-") as directory:
+    script = Path(directory) / "inspect.py"
+    urllib.request.urlretrieve(
+        "https://raw.githubusercontent.com/mathix420/alfred/master/deploy/inspect-alfred-matrix.py",
+        script,
+    )
+    runpy.run_path(str(script), run_name="__main__")
+PY
+```
+
+It uses the existing container environment to list public device IDs, names and
+fingerprints, and identify which recipients are missing from the trust list.
+It prints no token, reads no messages, opens no crypto store, and changes no
+Matrix settings. The suggested device entries are candidates, not verified pins.
+
+Compare the phone and desktop fingerprints with your trusted clients. Add their
+entries to `ALFRED_MATRIX_TRUSTED_DEVICES`, retain Hermes's entry, and choose
+**Update the stack** so Alfred restarts with the changed environment. Keep the
+existing token, sender device ID, pickle key and `alfred_data` volume. New
+recordings use a new encryption session shared with those devices. Older notes
+may become readable if Beeper requests their keys, but that is not guaranteed.
+
+The uploaded audio is WAV with 16 kHz mono PCM16 and Matrix voice metadata.
+Missing message keys and distorted or silent microphone audio are separate
+problems: the encrypted placeholder does not diagnose an unsupported codec.

@@ -167,6 +167,18 @@ or message encryption keys; their clients may show an undecryptable message unti
 trust and session sharing are configured. Discovering a key from a server does not
 verify it: compare it through an existing trusted client or the device owner.
 
+If Hermes receives a recording but Beeper shows **Encrypted message**, check
+whether the trust list contains only Hermes. Add the verified device entries for
+your Beeper phone and desktop, then update/restart Alfred with that environment.
+Alfred's own sender device is not a recipient to add. The next recording uses a
+new encryption session shared with the newly trusted clients. Existing recordings
+may need a key request from Beeper; changing the list does not guarantee recovery
+of old messages. Keep the current Matrix token, device ID, pickle key and volume.
+
+The attachment is WAV containing 16 kHz mono PCM16, with Matrix `m.audio` and
+voice-message metadata. An encrypted-message placeholder occurs before audio
+playback; adding a codec conversion does not resolve missing message keys.
+
 Keep one Alfred replica for each Matrix crypto identity. Back up the entire
 `alfred_data` volume, including the Matrix store and voice job journals, along with
 the pickle key. For your Duplicacy service, add:
