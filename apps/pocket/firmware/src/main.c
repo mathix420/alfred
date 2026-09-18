@@ -32,8 +32,16 @@
 
 static const char *TAG = "main";
 
-// Reported in the hello frame; bump on release.
-#define ALFRED_FIRMWARE_VERSION "0.2.0-pocket"
+#ifndef ALFRED_ENABLE_DEMO
+#define ALFRED_ENABLE_DEMO 0
+#endif
+
+// Reported in the hello frame; distinguish the opt-in demo from real devices.
+#if ALFRED_ENABLE_DEMO
+#define ALFRED_FIRMWARE_VERSION "0.3.0-demo"
+#else
+#define ALFRED_FIRMWARE_VERSION "0.3.0-production"
+#endif
 
 // NVS namespace/keys for device config (provisioned over BLE/SoftAP on first
 // run).
@@ -81,19 +89,23 @@ static void load_config(app_config_t *cfg) {
     ESP_LOGW(TAG, "no NVS config namespace; needs provisioning");
     return;
   }
-  bool ok =
-      nvs_get_str_into(h, NVS_KEY_WS_URI, cfg->ws_uri, sizeof(cfg->ws_uri)) &&
-      nvs_get_str_into(h, NVS_KEY_DEVICE_ID, cfg->device_id,
-                       sizeof(cfg->device_id)) &&
-      nvs_get_str_into(h, NVS_KEY_WIFI_SSID, cfg->wifi_ssid,
-                       sizeof(cfg->wifi_ssid)) &&
-      nvs_get_str_into(h, NVS_KEY_WIFI_PASS, cfg->wifi_pass,
-                       sizeof(cfg->wifi_pass));
+  // Read every field independently: one missing key must not hide the rest.
+  bool uri = nvs_get_str_into(h, NVS_KEY_WS_URI, cfg->ws_uri,
+                              sizeof(cfg->ws_uri));
+  bool id = nvs_get_str_into(h, NVS_KEY_DEVICE_ID, cfg->device_id,
+                             sizeof(cfg->device_id));
+  bool ssid = nvs_get_str_into(h, NVS_KEY_WIFI_SSID, cfg->wifi_ssid,
+                               sizeof(cfg->wifi_ssid));
+  bool password = nvs_get_str_into(h, NVS_KEY_WIFI_PASS, cfg->wifi_pass,
+                                   sizeof(cfg->wifi_pass));
   nvs_get_str_into(h, "device_token", cfg->device_token,
                    sizeof(cfg->device_token));
   nvs_get_str_into(h, "timezone", cfg->timezone, sizeof(cfg->timezone));
   nvs_close(h);
-  cfg->provisioned = ok;
+  cfg->provisioned = uri && id && ssid && password && cfg->wifi_ssid[0];
+  ESP_LOGI(TAG, "saved settings: endpoint=%d id=%d wifi=%d password=%d token=%d",
+           uri && cfg->ws_uri[0], id && cfg->device_id[0],
+           ssid && cfg->wifi_ssid[0], password, cfg->device_token[0] != 0);
 }
 
 // Trim leading/trailing whitespace (incl. CR/LF) in place; returns trimmed
@@ -385,6 +397,8 @@ static void on_welcome(const alfred_welcome_t *welcome, void *user) {
 }
 static void on_focus(const alfred_focus_snapshot_t *snapshot, void *user) {
   (void)user;
+  ESP_LOGI(TAG, "focus snapshot: tasks=%d online=%d demo=%d",
+           (int)snapshot->count, snapshot->online, snapshot->demo);
   ui_set_focus(snapshot);
 }
 static void on_task_completed(const alfred_task_completed_t *ack, void *user) {
@@ -440,11 +454,10 @@ void app_main(void) {
   ESP_LOGI(TAG, "Hermes pocket %s / protocol %d", ALFRED_FIRMWARE_VERSION,
            ALFRED_PROTOCOL_VERSION);
   esp_err_t err = nvs_flash_init();
-  if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
-      err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-    ESP_ERROR_CHECK(nvs_flash_erase());
-    err = nvs_flash_init();
-  }
+  // A failed configuration read must never erase a provisioned device.
+  if (err != ESP_OK)
+    ESP_LOGE(TAG, "NVS init failed; preserving saved settings: %s",
+             esp_err_to_name(err));
   ESP_ERROR_CHECK(err);
   ESP_ERROR_CHECK(esp_event_loop_create_default());
   ESP_ERROR_CHECK(board_init());
@@ -471,8 +484,11 @@ void app_main(void) {
     setenv("TZ", s_config.timezone, 1);
     tzset();
   }
-  bool bridge_configured = s_config.provisioned && s_config.ws_uri[0];
+  bool bridge_configured = s_config.provisioned && s_config.ws_uri[0] &&
+                           s_config.device_token[0];
   ui_set_configured(bridge_configured);
+  ESP_LOGI(TAG, "connection configuration: wifi=%d backend=%d demo=%d",
+           s_config.provisioned, bridge_configured, ALFRED_ENABLE_DEMO);
   if (s_config.provisioned) {
     ensure_device_id(&s_config);
     ESP_ERROR_CHECK(wifi_connect(&s_config));
@@ -495,8 +511,7 @@ void app_main(void) {
         ESP_LOGW(TAG, "bridge could not start; retry after configuring WS_URI");
     }
   } else
-    ESP_LOGI(TAG, "No WiFi setup: running the labeled local demo. Use SD "
-                  "setup/setup.txt to connect.");
+    ESP_LOGW(TAG, "WiFi setup required; configure NVS or SD setup/setup.txt");
   xTaskCreate(housekeeping_task, "pocket_status", 4096, NULL, 3, NULL);
   ESP_LOGI(TAG, "pocket ready: touch focus to complete, swipe for Today/Memo, "
                 "hold BOOT to talk, PWR to return");

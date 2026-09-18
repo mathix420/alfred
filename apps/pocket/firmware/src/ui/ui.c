@@ -12,7 +12,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#if ALFRED_ENABLE_DEMO
 #include "nvs.h"
+#endif
 #include "ui/theme.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,6 +47,7 @@ typedef struct {
   alfred_focus_snapshot_t *snapshot, *deferred;
   bool has_deferred, connected, configured, demo, touch_down, touch_hold;
   bool pending, acknowledged, completing, rebuild, focus_received;
+  bool connection_failed, server_demo;
   bool gesture_moved, transition, ignore_touch, press_at_top, press_at_bottom;
   page_t page, rendered_page;
   int slide_direction;
@@ -118,6 +121,13 @@ static int active_index(void) {
 static alfred_focus_task_t *active_task(void) {
   int idx = active_index();
   return idx >= 0 ? &s.snapshot->tasks[idx] : NULL;
+}
+static bool has_focus_data(void) {
+  return s.focus_received || s.demo;
+}
+static bool live_actions_ready(void) {
+  return s.focus_received && !s.server_demo && s.connected &&
+         s.snapshot->online;
 }
 
 static lv_obj_t *box(lv_obj_t *parent, int x, int y, int w, int h) {
@@ -342,11 +352,14 @@ static void update_status(void) {
   lv_label_set_text(s.clock, clock);
   lv_obj_set_style_bg_color(s.link,
                             color(s.demo ? POCKET_PERSONAL
-                                  : s.connected && s.snapshot->online
+                                  : live_actions_ready()
                                       ? POCKET_GREEN
                                       : 0xE8927C),
                             0);
   lv_label_set_text(s.status, s.demo ? "Demo"
+                              : !s.configured || s.server_demo ? "Setup"
+                              : !has_focus_data() && !s.connection_failed
+                                  ? "Connecting"
                               : (!s.connected || !s.snapshot->online)
                                   ? "Offline"
                                   : "");
@@ -373,6 +386,7 @@ static void animate_pop(lv_obj_t *obj) {
   lv_anim_set_path_cb(&a, lv_anim_path_overshoot);
   lv_anim_start(&a);
 }
+#if ALFRED_ENABLE_DEMO
 static void seed_demo(void) {
   memset(s.snapshot, 0, sizeof(*s.snapshot));
   s.snapshot->count = 5;
@@ -433,13 +447,19 @@ static void save_demo(void) {
     nvs_close(h);
   }
 }
+#endif
 static void begin_complete(void) {
   if (s.pending || s.completing)
     return;
+  if (!has_focus_data()) {
+    if (s.configured)
+      emit(UI_REFRESH, NULL, NULL);
+    return;
+  }
   alfred_focus_task_t *task = active_task();
   if (!task)
     return;
-  if (!s.demo && (!s.connected || !s.snapshot->online)) {
+  if (!s.demo && !live_actions_ready()) {
     show_page(PAGE_OFFLINE);
     return;
   }
@@ -451,7 +471,10 @@ static void begin_complete(void) {
   s.completing = true;
   s.pending_since = ticks();
   s.complete_since = ticks();
+  s.acknowledged = false;
+#if ALFRED_ENABLE_DEMO
   s.acknowledged = s.demo && !s.connected;
+#endif
   if (!s.acknowledged)
     emit(UI_COMPLETE, s.pending_id, s.request_id);
   s.rebuild = true;
@@ -477,8 +500,10 @@ static void finish_complete(void) {
     memcpy(s.snapshot, s.deferred, sizeof(*s.snapshot));
     s.has_deferred = false;
   }
+#if ALFRED_ENABLE_DEMO
   if (s.demo && !s.connected)
     save_demo();
+#endif
   s.pending = false;
   s.completing = false;
   s.acknowledged = false;
@@ -488,7 +513,12 @@ static void finish_complete(void) {
   s.note[0] = 0;
   show_page(PAGE_FOCUS);
 }
+static void build_offline(void);
 static void build_focus(void) {
+  if (!has_focus_data()) {
+    build_offline();
+    return;
+  }
   alfred_focus_task_t *task = active_task();
   if (!task) {
     s.hero = flower(s.body, 124, 137, 120, POCKET_UNCHECKED, false);
@@ -669,19 +699,37 @@ static void build_voice(void) {
 static void build_offline(void) {
   flower(s.body, 32, 101, 120, 0x161618, false);
   label(s.body, 72, 143, 48, "~", &inter_34, 0x54545C);
-  label(s.body, 24, 246, 320, s.demo ? "Meet Hermes soon" : "No connection",
+  const char *title = s.demo ? "Meet Hermes soon"
+                      : s.server_demo ? "Server setup"
+                      : !s.configured ? "Setup needed"
+                      : !has_focus_data() && !s.connection_failed
+                          ? "Connecting"
+                          : "Offline";
+  const char *description =
+      s.demo ? "This is a demo. Connect Hermes to talk and sync your real tasks."
+      : s.server_demo
+          ? "The server is in demo mode. Connect it to TodoMate to load your tasks."
+      : !s.configured
+          ? "Connect Wi-Fi and add your server settings to load your tasks."
+      : !has_focus_data() && s.connected && !s.connection_failed
+          ? "Connected. Waiting for your tasks."
+      : !has_focus_data() && !s.connection_failed
+          ? "Connecting to your server to load your tasks."
+      : !has_focus_data()
+          ? "Can't reach your server. Retrying automatically."
+          : "Can't reach your server. Your focus is kept here while we reconnect.";
+  label(s.body, 24, 246, 320, title,
         &inter_34, POCKET_TEXT);
-  label(s.body, 24, 302, 320,
-        s.demo
-            ? "This is a demo. Connect Hermes to talk and sync your real tasks."
-            : "Can't reach Hermes. Your focus is kept here while we reconnect.",
+  label(s.body, 24, 302, 320, description,
         &inter_17, POCKET_SECONDARY);
-  set_hint(s.demo ? "Tap to return" : "Tap to retry", POCKET_DIM, false);
+  set_hint(s.demo ? "Tap to return"
+           : !s.configured ? "Setup needed"
+                          : "Tap to retry", POCKET_DIM, false);
 }
 static void update_handle(void) {
   bool main_or_sheet =
       s.page == PAGE_FOCUS || s.page == PAGE_TODAY || s.page == PAGE_MEMO;
-  if (!main_or_sheet || s.transition)
+  if (!main_or_sheet || s.transition || !has_focus_data())
     lv_obj_add_flag(s.grabber, LV_OBJ_FLAG_HIDDEN);
   else {
     lv_obj_set_y(s.grabber, s.page == PAGE_FOCUS ? 439 : 7);
@@ -797,6 +845,8 @@ static void touch_release_action(int dx, int dy) {
     return;
   }
   if (vertical_swipe(dx, dy)) {
+    if (!has_focus_data())
+      return;
     bool header = s.press_y < HEADER_END_Y;
     if (s.page == PAGE_FOCUS && !s.pending)
       show_page(dy < 0 ? PAGE_TODAY : PAGE_MEMO);
@@ -967,7 +1017,9 @@ esp_err_t ui_init(void) {
   s.deferred = calloc(1, sizeof(*s.deferred));
   if (!s.snapshot || !s.deferred)
     return ESP_ERR_NO_MEM;
+#if ALFRED_ENABLE_DEMO
   seed_demo();
+#endif
   lv_init();
   lv_tick_set_cb(ticks);
   s_mutex = xSemaphoreCreateRecursiveMutex();
@@ -1000,7 +1052,7 @@ esp_err_t ui_init(void) {
   lv_obj_set_style_bg_color(status_background, color(0), 0);
   lv_obj_set_style_bg_opa(status_background, LV_OPA_COVER, 0);
   s.clock = label(s.root, 24, 18, 110, "--:--", &inter_17, POCKET_SECONDARY);
-  s.status = label(s.root, 220, 20, 80, "Demo", &inter_14, POCKET_DIM);
+  s.status = label(s.root, 220, 20, 80, "", &inter_14, POCKET_DIM);
   lv_obj_set_style_text_align(s.status, LV_TEXT_ALIGN_RIGHT, 0);
   s.link = box(s.root, 306, 25, 7, 7);
   lv_obj_set_style_radius(s.link, 4, 0);
@@ -1022,7 +1074,8 @@ esp_err_t ui_init(void) {
   lv_timer_create(ui_tick, 33, NULL);
   if (xTaskCreate(render_task, "pocket_ui", 8192, NULL, 5, NULL) != pdPASS)
     return ESP_ERR_NO_MEM;
-  ESP_LOGI(TAG, "native focus UI ready (368x448, demo)");
+  ESP_LOGI(TAG, "native focus UI ready (368x448, %s)",
+           ALFRED_ENABLE_DEMO ? "demo enabled" : "production");
   return ESP_OK;
 }
 void ui_register_actions(ui_action_cb_t cb, void *user) {
@@ -1034,15 +1087,20 @@ void ui_register_actions(ui_action_cb_t cb, void *user) {
 void ui_set_configured(bool configured) {
   ui_lock();
   s.configured = configured;
+  s.rebuild = true;
+  update_status();
   ui_unlock();
 }
 void ui_set_connection(bool connected) {
   ui_lock();
   s.connected = connected;
+  s.connection_failed = !connected;
   if (!connected && s.pending)
     cancel_pending("Not saved. Reconnect to try again.");
   if (!connected && (s.page == PAGE_LISTENING || s.page == PAGE_THINKING))
     show_page(PAGE_OFFLINE);
+  if (!has_focus_data() || s.page == PAGE_OFFLINE)
+    s.rebuild = true;
   update_status();
   ui_unlock();
 }
@@ -1063,7 +1121,22 @@ void ui_set_focus(const alfred_focus_snapshot_t *snapshot) {
   if (!snapshot)
     return;
   ui_lock();
-  s.focus_received = true;
+#if !ALFRED_ENABLE_DEMO
+  if (snapshot->demo) {
+    s.server_demo = true;
+    s.snapshot->online = false;
+    if (s.pending)
+      cancel_pending("Server is in demo mode. Task not saved.");
+    show_page(PAGE_OFFLINE);
+    update_status();
+    ui_unlock();
+    return;
+  }
+#endif
+  s.server_demo = false;
+  // An offline, empty initial frame is not confirmation of an empty task list.
+  s.focus_received = s.focus_received || snapshot->online || snapshot->count > 0;
+  s.connection_failed = !snapshot->online;
   s.demo = snapshot->demo;
   if (s.pending) {
     memcpy(s.deferred, snapshot, sizeof(*snapshot));
@@ -1122,7 +1195,7 @@ void ui_handle_back(void) {
     emit(UI_CANCEL, NULL, NULL);
   } else if (s.page == PAGE_THINKING)
     emit(UI_CANCEL, NULL, NULL);
-  show_page(s.page == PAGE_FOCUS ? PAGE_TODAY : PAGE_FOCUS);
+  show_page(has_focus_data() && s.page == PAGE_FOCUS ? PAGE_TODAY : PAGE_FOCUS);
   ui_unlock();
 }
 void ui_handle_ptt(bool pressed) {
@@ -1132,7 +1205,7 @@ void ui_handle_ptt(bool pressed) {
       ui_unlock();
       return;
     }
-    if (s.demo || !s.connected || !s.snapshot->online) {
+    if (s.demo || !live_actions_ready()) {
       show_page(PAGE_OFFLINE);
       ui_unlock();
       return;

@@ -4,6 +4,11 @@
 #include "net/protocol.h"
 #include <stdbool.h>
 
+// Production never fabricates tasks. Demo firmware must opt in explicitly.
+#ifndef ALFRED_ENABLE_DEMO
+#define ALFRED_ENABLE_DEMO 0
+#endif
+
 typedef enum {
   UI_COMPLETE,
   UI_REFRESH,

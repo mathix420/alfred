@@ -22,7 +22,10 @@ Matrix. The device does not transcribe, display replies, or play spoken replies.
 - **PWR** short press opens Today from Focus and returns from other pages.
 
 The task, flower, fonts, and animations render locally. No microSD artwork is
-required. Without configuration, the device shows a clearly labeled local demo.
+required. Production firmware starts with a setup or connection screen and only
+displays tasks received from the backend. It never substitutes sample tasks when
+configuration is missing or the connection fails. Real tasks already received
+remain visible during a reconnect, with completion disabled while offline.
 
 ## Build and flash
 
@@ -34,10 +37,13 @@ pio run -e companion_v1
 pio run -e companion_v1 -t upload --upload-port /dev/ttyACM0
 ```
 
-`companion_v1` is the default and matches the tested V1 board: SH8601 display,
+`companion_v1` is the default **production** build and matches the tested V1 board: SH8601 display,
 FT3168 touch, ES8311 microphone codec, and AXP2101 power management. The
 `companion` environment selects the V2 CO5300/CST816 drivers; use the environment
 matching your physical hardware. Logs use 115200 baud.
+
+The optional `companion_v1_demo` environment explicitly enables local sample
+tasks for development. It is not used by the normal build/flash commands.
 
 ## Wi-Fi and backend configuration
 

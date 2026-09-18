@@ -78,6 +78,9 @@ CONFIG_NVS_ENCRYPTION=n
 # TODO(security): enable NVS encryption + flash encryption before shipping.
 
 # --- Logging -----------------------------------------------------------------
+# The board's USB connector is the ESP32-S3 USB Serial/JTAG console.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
 
