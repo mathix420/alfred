@@ -91,6 +91,7 @@ static void load_config(app_config_t *cfg) {
                        sizeof(cfg->wifi_pass));
   nvs_get_str_into(h, "device_token", cfg->device_token,
                    sizeof(cfg->device_token));
+  nvs_get_str_into(h, "timezone", cfg->timezone, sizeof(cfg->timezone));
   nvs_close(h);
   cfg->provisioned = ok;
 }

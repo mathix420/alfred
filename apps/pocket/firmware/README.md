@@ -68,6 +68,7 @@ settings take precedence. BLE provisioning is not implemented.
 | `ws_uri`       | Backend WebSocket URL including `/ws` |
 | `device_id`    | Stable device identifier              |
 | `device_token` | Shared backend device token           |
+| `timezone`     | Optional POSIX timezone string        |
 
 ## Protocol and source
 
