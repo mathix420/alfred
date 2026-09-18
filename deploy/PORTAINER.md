@@ -212,6 +212,38 @@ Hermes and your existing Beeper clients. A Beeper Desktop API token is not a
 Matrix session token. Reusing another client's Matrix device with an empty
 Alfred crypto store will fail the identity check.
 
+For a **Beeper sender account**, create the fresh session with
+[provision-beeper-session.sh](provision-beeper-session.sh). It uses Beeper's
+official `bbctl` email-code login with an isolated configuration and
+`--no-desktop`, so it does not reuse your existing desktop session or initialize
+encryption keys. From the Hermes container console:
+
+```bash
+(
+  set -eu
+  umask 077
+  alfred_beeper_script="$(mktemp)"
+  trap 'rm -f "$alfred_beeper_script"' EXIT
+  curl --fail --silent --show-error --location \
+    https://raw.githubusercontent.com/mathix420/alfred/master/deploy/provision-beeper-session.sh \
+    --output "$alfred_beeper_script"
+  bash "$alfred_beeper_script" "${HERMES_HOME:-/opt/data}/alfred-matrix-session"
+)
+```
+
+Enter your **Beeper account email** and the code it receives. The new private
+directory contains `bbctl.json` and `matrix-session.env`; the latter supplies
+only the sender homeserver, user ID, access token, and device ID. It leaves
+Alfred's existing device token and pickle key unchanged. Import those four
+settings into Portainer, or use the saved Matrix access token at the hidden
+prompt of the `inspect` command below to complete fingerprint verification.
+Keep this directory if later setup fails; the script refuses to overwrite an
+existing session. The Element session used to administer Hermes belongs to the
+bot account and must not supply Alfred's sender credentials.
+
+For other Matrix homeservers, discover the supported login methods below. Beeper
+users can also run this check, then choose `inspect` with their saved session.
+
 ```bash
 read -r -p 'Matrix HTTPS homeserver: ' ALFRED_MATRIX_SERVER
 read -r -p 'Hermes Matrix user ID (@name:server): ' ALFRED_HERMES_MXID
@@ -274,9 +306,10 @@ alfred_matrix_setup password-login \
   --output "$ALFRED_PRIVATE/matrix.env"
 ```
 
-Otherwise, use your provider's supported SSO/device authorization flow to obtain
-a fresh dedicated Matrix session, then inspect it with this alternative. The
-token prompt is hidden. The helper does not automate Beeper/SSO login.
+Otherwise, use your provider's supported SSO/device authorization flow (or the
+Beeper script above) to obtain a fresh dedicated Matrix session, then inspect it
+with this alternative. The token prompt is hidden. The Python inspection helper
+does not itself perform Beeper/SSO login.
 
 ```bash
 alfred_matrix_setup inspect \
@@ -297,6 +330,17 @@ of your own Beeper devices that should decrypt these recordings. Server discover
 alone does not establish trust. The helper writes the selected pins as
 `ALFRED_MATRIX_TRUSTED_DEVICES`; leaving verification unfinished keeps Matrix
 disabled. It sends no messages, joins no rooms and uploads no encryption keys.
+
+The Hermes inspector's `Hermes token device` line identifies the bot's active
+session. Include that device after checking its fingerprint. Another Element
+login on the bot account is a separate device and is optional. Your own phone,
+desktop, and web client sessions are also optional recipients: include the
+verified ones where you want to decrypt Alfred's voice notes. Alfred withholds
+encryption keys from devices omitted from this list. Device IDs identify a
+session, while the `ed25519` value pins its encryption identity; retain both
+unchanged when copying a verified entry. In Portainer's individual variable
+editor, paste the JSON array alone, without the `.env` assignment or enclosing
+shell quotes.
 
 **5. Import Matrix settings and verify the persistent identity**
 
