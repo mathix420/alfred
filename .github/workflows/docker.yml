@@ -53,6 +53,9 @@ jobs:
           command -v cc
           bun test
 
+      - name: Check deployment helpers
+        run: python3 -m unittest discover -s deploy -p 'test_*.py'
+
       - name: Build browser assets
         run: bun run build
 

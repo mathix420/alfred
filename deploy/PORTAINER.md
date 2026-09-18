@@ -118,6 +118,46 @@ can remain disabled while you use the task display.
 
 **3. Find the existing Hermes Matrix settings**
 
+If you are already in the **Hermes container's Portainer console**, paste this
+Bash block (replace the example room ID). It downloads the inspector to a private
+temporary directory and prints an Alfred environment template:
+
+```bash
+(
+  set -eu
+  umask 077
+  alfred_inspector_dir="$(mktemp -d)"
+  trap 'rm -rf "$alfred_inspector_dir"' EXIT
+  curl --fail --silent --show-error --location \
+    https://raw.githubusercontent.com/mathix420/alfred/master/deploy/inspect-hermes-matrix.py \
+    --output "$alfred_inspector_dir/inspect.py"
+  python "$alfred_inspector_dir/inspect.py" \
+    --resolve-user --alfred-env --devices \
+    --room '!YOUR_ROOM:example.org'
+)
+```
+
+The inspector reads the Hermes `.env` and container environment, resolves the bot
+identity using its token in memory, and queries public device keys. It never
+prints tokens, sends messages, creates sessions, or modifies Hermes settings.
+If exactly one allowed sender remains after excluding the bot, it suggests that
+user and discovers their homeserver through public Matrix `.well-known`
+metadata. Confirm that sender is your account; add `--user '@you:example.org'`
+when there are multiple allowed users. Failed discovery leaves a comment to fill
+in manually rather than assuming Hermes and your account share a homeserver.
+
+Only discovered public settings become active environment entries. Missing
+session credentials and the pickle key remain comments, preserving existing
+values on import; device fingerprint candidates are also commented out and must
+be independently verified. Matrix stays disabled until setup is complete. Keep
+the existing ESP32 device token. If you have never set a Matrix pickle key,
+generate it once and save the result privately in the stack environment:
+
+```bash
+python -c 'import secrets; print("ALFRED_MATRIX_PICKLE_KEY=" + secrets.token_hex(48))'
+```
+
+For the original JSON inspection from your Docker host, use the following commands.
 This optional step reads a whitelist of public Matrix settings inside the Hermes
 container. It does not print its access token or dump its environment.
 
