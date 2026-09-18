@@ -44,6 +44,12 @@ FT3168 touch, ES8311 microphone codec, and AXP2101 power management. The
 `companion` environment selects the V2 CO5300/CST816 drivers; use the environment
 matching your physical hardware. Logs use 115200 baud.
 
+V1 startup resets the FT3168 through TCA9554 expander pin P2 (EXIO2), waits
+100 ms after releasing its 20 ms reset pulse, and retries initialization up to
+three times. It preserves the display's reset/power pins and other expander
+settings. This also reinitializes touch after a warm ESP32 reset; persistent
+failures are reported as `touch: reset/probe attempt … failed` in the USB log.
+
 The optional `companion_v1_demo` environment explicitly enables local sample
 tasks for development. It is not used by the normal build/flash commands.
 

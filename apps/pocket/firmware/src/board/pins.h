@@ -34,6 +34,7 @@
 #define BOARD_I2C_ADDR_FT3168   0x38        /* V1 touch controller (FT6x36 family) */
 #define BOARD_I2C_ADDR_CST816   0x15        /* V2 touch controller */
 #define BOARD_I2C_ADDR_ES8311   0x18        /* audio codec control */
+#define BOARD_I2C_ADDR_TCA9554  0x20        /* peripheral reset / interrupt expander */
 
 /* ----------------------------------------------------------------------------
  * AMOLED display — QSPI (368x448). V1 = SH8601, V2 = CO5300.
@@ -55,11 +56,12 @@
 #define BOARD_LCD_PANEL_HEIGHT  448
 #define BOARD_LCD_BITS_PER_PX   16          /* RGB565 */
 
-/* Touch controller shared interrupt + reset (controller itself is on I2C).
- * Reference: TP_INT=21. No separate touch reset GPIO is used (the reference
- * brings the controller up without one), so RST = -1. */
+/* Touch interrupt is a direct ESP GPIO. V1 TP_RESET is TCA9554 P2 (EXIO2),
+ * not a direct GPIO: see the official board schematic's LCD pin table.
+ * P0 resets the display and P1 enables its power; never toggle them here. */
 #define BOARD_TOUCH_INT_GPIO    21
 #define BOARD_TOUCH_RST_GPIO    -1
+#define BOARD_TOUCH_RST_EXIO    2
 
 /* ----------------------------------------------------------------------------
  * Audio — ES8311 codec over I2S (control plane is on the shared I2C bus above)

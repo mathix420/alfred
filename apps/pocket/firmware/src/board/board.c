@@ -342,19 +342,61 @@ esp_lcd_panel_io_handle_t board_display_io(void) { return s_panel_io; }
 /* FT3168 native portrait coordinates, polled by the LVGL input driver.
  * Source: Waveshare examples/arduino/libraries/Arduino_DriveBus/src/touch_chip/
  * Arduino_FT3x68.{h,cpp}. No coordinate swap or rotation on the V1 panel. */
+#if BOARD_VERSION == BOARD_VERSION_V1
+static esp_err_t touch_reset(void) {
+  /* V1 schematic: TCA9554 P2=TP_RESET, P0=LCD_RESET, P1=DSI_PWR_EN.
+   * Preserve every other output/direction bit: the display is already running.
+   * https://files.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.8/ESP32-S3-Touch-AMOLED-1.8.pdf
+   */
+  const uint8_t reset_bit = 1U << BOARD_TOUCH_RST_EXIO;
+  const uint8_t output_reg = 0x01, config_reg = 0x03;
+  uint8_t output, config;
+  ESP_RETURN_ON_ERROR(i2c_read_reg(BOARD_I2C_ADDR_TCA9554, output_reg, &output, 1),
+                      TAG, "touch reset output latch");
+  ESP_RETURN_ON_ERROR(i2c_read_reg(BOARD_I2C_ADDR_TCA9554, config_reg, &config, 1),
+                      TAG, "touch reset direction");
+  ESP_RETURN_ON_ERROR(i2c_write_reg(BOARD_I2C_ADDR_TCA9554, output_reg,
+                                   output & ~reset_bit), TAG, "assert touch reset");
+  esp_err_t err = i2c_write_reg(BOARD_I2C_ADDR_TCA9554, config_reg,
+                               config & ~reset_bit);
+  if (err == ESP_OK) vTaskDelay(pdMS_TO_TICKS(20));
+  /* Release even if setting the direction failed, so a transient I2C error
+   * does not intentionally leave an already-output reset pin asserted. */
+  esp_err_t release_err = i2c_write_reg(BOARD_I2C_ADDR_TCA9554, output_reg,
+                                       output | reset_bit);
+  if (err != ESP_OK) return err;
+  if (release_err != ESP_OK) return release_err;
+  /* Vendor example uses a 20ms reset pulse. FT3168 datasheet table 3-5
+   * requires at least 70ms after release before reporting points.
+   * https://files.waveshare.com/wiki/common/FT3168.pdf */
+  vTaskDelay(pdMS_TO_TICKS(100));
+  return ESP_OK;
+}
+#endif
+
 esp_err_t board_touch_init(void) {
+  if (s_touch_ready) return ESP_OK;
   ESP_RETURN_ON_ERROR(board_i2c_init(), TAG, "i2c for touch");
 #if BOARD_VERSION == BOARD_VERSION_V1
-  uint8_t chip_id;
-  ESP_RETURN_ON_ERROR(i2c_read_reg(BOARD_I2C_ADDR_FT3168, 0xA0, &chip_id, 1),
-                      TAG, "FT3168 probe");
-  /* Active mode continuously reports contact/release for touch-and-hold. */
-  ESP_RETURN_ON_ERROR(i2c_write_reg(BOARD_I2C_ADDR_FT3168, 0xA5, 0x00),
-                      TAG, "FT3168 active mode");
-  vTaskDelay(pdMS_TO_TICKS(20));
-  s_touch_ready = true;
-  ESP_LOGI(TAG, "touch: FT3168 @0x%02x id=0x%02x", BOARD_I2C_ADDR_FT3168, chip_id);
-  return ESP_OK;
+  esp_err_t err = ESP_FAIL;
+  for (unsigned attempt = 1; attempt <= 3; ++attempt) {
+    uint8_t chip_id = 0;
+    err = touch_reset();
+    if (err == ESP_OK)
+      err = i2c_read_reg(BOARD_I2C_ADDR_FT3168, 0xA0, &chip_id, 1);
+    /* Active mode continuously reports contact/release for touch-and-hold. */
+    if (err == ESP_OK)
+      err = i2c_write_reg(BOARD_I2C_ADDR_FT3168, 0xA5, 0x00);
+    if (err == ESP_OK) {
+      vTaskDelay(pdMS_TO_TICKS(20));
+      s_touch_ready = true;
+      ESP_LOGI(TAG, "touch: FT3168 @0x%02x id=0x%02x", BOARD_I2C_ADDR_FT3168, chip_id);
+      return ESP_OK;
+    }
+    ESP_LOGW(TAG, "touch: reset/probe attempt %u/3 failed (%s)", attempt,
+             esp_err_to_name(err));
+  }
+  return err;
 #else
   return ESP_ERR_NOT_SUPPORTED;
 #endif
