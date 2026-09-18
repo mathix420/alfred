@@ -34,6 +34,17 @@ int main(void) {
         cJSON_AddBoolToObject(output, "demo", snapshot->demo);
         cJSON_AddBoolToObject(output, "online", snapshot->online);
         cJSON_AddBoolToObject(output, "configured", snapshot->configured);
+        if (snapshot->has_categories) {
+          cJSON *categories = cJSON_AddArrayToObject(output, "categories");
+          for (size_t index = 0; index < snapshot->category_count; ++index) {
+            const alfred_focus_category_t *category = &snapshot->categories[index];
+            cJSON *item = cJSON_CreateObject();
+            text(item, "id", category->id);
+            text(item, "title", category->title);
+            text(item, "color", category->color);
+            cJSON_AddItemToArray(categories, item);
+          }
+        }
         cJSON *tasks = cJSON_AddArrayToObject(output, "tasks");
         for (size_t index = 0; index < snapshot->count; ++index) {
           const alfred_focus_task_t *task = &snapshot->tasks[index];
@@ -43,6 +54,7 @@ int main(void) {
           text(item, "memo", task->memo);
           text(item, "dueAt", task->due_at);
           text(item, "category", task->category == TASK_WORK ? "work" : task->category == TASK_HEALTH ? "health" : "personal");
+          if (task->category_id[0]) text(item, "categoryId", task->category_id);
           cJSON_AddBoolToObject(item, "completed", task->completed);
           cJSON_AddItemToArray(tasks, item);
         }

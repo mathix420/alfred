@@ -142,6 +142,7 @@ contract("Bun ↔ ESP32 C wire contract (requires cc and official cJSON source)"
         demo: false,
         online: true,
         configured: true,
+        categories: snapshot.categories,
         tasks: snapshot.tasks.map((task) => ({ ...task, dueAt: task.dueAt ?? "" })),
       });
       send({ type: "complete_task", id: "investor-demo", requestId: "contract-complete" });
@@ -208,6 +209,54 @@ contract("Bun ↔ ESP32 C wire contract (requires cc and official cJSON source)"
       text: reply,
       final: true,
     });
+  });
+
+  it("preserves TodoMate list identity, order, Unicode labels and colors in C", async () => {
+    const categories = [
+      { id: "health-list", title: "santé", color: "#f55cbb" },
+      { id: "contract-list", title: "contrat IA", color: "#008bff" },
+      { id: "other-contract", title: "contrat IA", color: "#ffcc22" },
+      { id: "a".repeat(63), title: `${"é".repeat(31)}x`, color: "#12aabb" },
+    ];
+    const tasks = categories.map((category, i) => ({
+      ...demoTasks().tasks[0]!,
+      id: `task-${i}`,
+      category: "personal" as const,
+      categoryId: category.id,
+      completed: i === 1,
+    }));
+    const list = parseTaskList({ categories, tasks, focusId: tasks[0]!.id });
+    const result = await parse({
+      type: "focus",
+      snapshot: { ...list, revision: 10, mode: "live", connection: "online" },
+    });
+    expect(result.result).toBe("ok");
+    expect(result.categories).toEqual(categories);
+    expect(result.tasks).toEqual(tasks.map((task) => ({ ...task, dueAt: task.dueAt ?? "" })));
+  });
+
+  it("rejects category metadata that could overflow buffers or merge list identities", async () => {
+    const category = { id: "list", title: "List", color: "#00aaff" };
+    for (const categories of [
+      null,
+      [category, category],
+      [{ ...category, id: "a".repeat(64) }],
+      [{ ...category, id: "_invalid" }],
+      [{ ...category, title: "é".repeat(32) }],
+      [{ ...category, color: "blue" }],
+      Array.from({ length: 33 }, (_, i) => ({ ...category, id: `list-${i}` })),
+    ]) {
+      const list = { categories, tasks: [], focusId: null };
+      expect(() => parseTaskList(list)).toThrow();
+      expect(
+        (
+          await parse({
+            type: "focus",
+            snapshot: { ...list, revision: 0, mode: "live", connection: "online" },
+          })
+        ).result,
+      ).toBe("bad_field");
+    }
   });
 
   it("rejects malformed controls and snapshots over the firmware task limit", async () => {

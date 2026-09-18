@@ -3,11 +3,13 @@ import { dirname } from "node:path";
 import type { TaskAdapter } from "./types";
 import {
   identifier,
+  LEGACY_CATEGORIES,
   parseTaskList,
   PocketError,
   type FocusSnapshot,
   type FocusTask,
   type TaskList,
+  type TaskCategory,
 } from "./types";
 
 export function demoTasks(now = new Date()): TaskList {
@@ -55,7 +57,11 @@ export function demoTasks(now = new Date()): TaskList {
       completed: false,
     },
   ];
-  return { tasks, focusId: tasks[0]!.id };
+  return {
+    tasks,
+    focusId: tasks[0]!.id,
+    categories: LEGACY_CATEGORIES.map((category) => ({ ...category })),
+  };
 }
 
 function demoFocus(tasks: FocusTask[]): string | null {
@@ -71,6 +77,7 @@ interface SavedState {
   revision: number;
   tasks: FocusTask[];
   focusId: string | null;
+  categories?: TaskCategory[];
   completedIds: string[];
   requests: [string, string][];
 }
@@ -89,7 +96,7 @@ export class TaskStore {
     initialMode: "demo" | "live" = adapter ? "live" : "demo",
   ) {
     this.current = {
-      ...(initialMode === "live" ? { tasks: [], focusId: null } : demoTasks()),
+      ...(initialMode === "live" ? { tasks: [], focusId: null, categories: [] } : demoTasks()),
       revision: 0,
       mode: initialMode,
       connection: initialMode === "live" ? "offline" : "unconfigured",
@@ -212,6 +219,7 @@ export class TaskStore {
                   item.id === id ? { ...item, completed: true } : item,
                 ),
                 focusId: null,
+                categories: this.current.categories,
               };
       } catch (error) {
         if (this.adapter) this.markOffline();
@@ -258,7 +266,7 @@ export class TaskStore {
     const focusId = tasks.some((item) => item.id === validated.focusId && !item.completed)
       ? validated.focusId
       : (tasks.find((item) => !item.completed)?.id ?? null);
-    return { tasks, focusId };
+    return { ...validated, tasks, focusId };
   }
 
   private markOffline(): void {

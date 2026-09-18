@@ -4,6 +4,7 @@
 // ES8311 suspend sequence. I2S MCLK is always sample_rate * 256.
 #include "audio/audio.h"
 
+#include <inttypes.h>
 #include <stdatomic.h>
 #include "board/board.h"
 #include "board/pins.h"
@@ -12,6 +13,7 @@
 #include "driver/i2s_std.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/ringbuf.h"
 #include "freertos/semphr.h"
@@ -38,6 +40,10 @@ static atomic_bool s_play_finish;
 static atomic_bool s_play_abort;
 static alfred_mic_cb_t s_mic_cb;
 static void *s_mic_user;
+static int64_t s_capture_started_us;
+/* Written by the capture task, read only after s_capture_running is false. */
+static uint64_t s_capture_bytes;
+static uint64_t s_forwarded_bytes;
 
 static esp_err_t codec_write(uint8_t reg, uint8_t value) {
   const uint8_t data[] = {reg, value};
@@ -109,9 +115,11 @@ static void capture_task(void *arg) {
     size_t got = 0;
     // ESP-IDF I2S timeout is milliseconds, not FreeRTOS ticks.
     esp_err_t err = i2s_channel_read(s_rx_chan, pcm, sizeof(pcm), &got, 100);
-    if (err == ESP_OK && got && atomic_load(&s_recording) && s_mic_cb)
+    if (err == ESP_OK) s_capture_bytes += got;
+    if (err == ESP_OK && got && atomic_load(&s_recording) && s_mic_cb) {
+      s_forwarded_bytes += got;
       s_mic_cb(pcm, got, s_mic_user);
-    else if (err != ESP_OK && err != ESP_ERR_TIMEOUT)
+    } else if (err != ESP_OK && err != ESP_ERR_TIMEOUT)
       ESP_LOGW(TAG, "capture: %s", esp_err_to_name(err));
   }
   atomic_store(&s_capture_running, false);
@@ -176,8 +184,20 @@ static esp_err_t stop_playback(bool abort) {
 
 static esp_err_t stop_capture(void) {
   if (!atomic_load(&s_recording)) return ESP_OK;
+  /* Measure the recording window before waiting for an in-flight network send.
+   * A final I2S frame may be read but discarded after this stop request. */
+  const int64_t stopped_us = esp_timer_get_time();
   atomic_store(&s_recording, false);
   while (atomic_load(&s_capture_running)) vTaskDelay(pdMS_TO_TICKS(5));
+  const int64_t elapsed_us = stopped_us - s_capture_started_us;
+  const uint64_t bytes_per_second = elapsed_us > 0
+      ? s_forwarded_bytes * 1000000ULL / (uint64_t)elapsed_us : 0;
+  ESP_LOGI(TAG, "capture: read_bytes=%" PRIu64 " forwarded_bytes=%" PRIu64
+                " window_ms=%" PRId64 " pcm_ms=%" PRIu64
+                " forwarded_bytes_per_s=%" PRIu64 " expected=32000",
+           s_capture_bytes, s_forwarded_bytes, elapsed_us / 1000,
+           s_forwarded_bytes * 1000 / (ALFRED_MIC_SAMPLE_RATE * sizeof(int16_t)),
+           bytes_per_second);
   esp_err_t err = codec_mic(false);
   if (s_rx_enabled) {
     i2s_channel_disable(s_rx_chan);
@@ -220,8 +240,15 @@ esp_err_t audio_init(void) {
           .din = BOARD_I2S_DIN_GPIO,
       },
   };
+  i2s_std_config_t rx_config = config;
+  /* ESP32-S3 mono+BOTH duplicates samples in RX DMA, doubling playback length
+   * when those words are sent as mono PCM. Keep TX on both slots, but receive
+   * only the ES8311's left slot. Espressif's hardware validation documents this:
+   * https://github.com/espressif/arduino-esp32/blob/master/tests/validation/i2s/README.md
+   */
+  rx_config.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
   if (i2s_channel_init_std_mode(s_tx_chan, &config) != ESP_OK ||
-      i2s_channel_init_std_mode(s_rx_chan, &config) != ESP_OK ||
+      i2s_channel_init_std_mode(s_rx_chan, &rx_config) != ESP_OK ||
       codec_init() != ESP_OK) goto fail;
   s_sample_rate = ALFRED_MIC_SAMPLE_RATE;
   s_initialized = true;
@@ -250,6 +277,9 @@ esp_err_t audio_record_start(alfred_mic_cb_t cb, void *user) {
    * zero-filled DMA while recording; the DAC and speaker amp stay off. */
   if ((err = i2s_channel_enable(s_tx_chan)) != ESP_OK) goto cleanup;
   s_tx_enabled = true;
+  s_capture_bytes = 0;
+  s_forwarded_bytes = 0;
+  s_capture_started_us = esp_timer_get_time();
   if ((err = i2s_channel_enable(s_rx_chan)) != ESP_OK) goto cleanup;
   s_rx_enabled = true;
   s_mic_cb = cb;

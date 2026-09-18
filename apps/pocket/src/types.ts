@@ -2,14 +2,30 @@ export interface FocusTask {
   id: string;
   title: string;
   category: "work" | "health" | "personal";
+  /** Actual TodoMate list membership; category remains a legacy firmware fallback. */
+  categoryId?: string;
   memo: string;
   dueAt: string | null;
   completed: boolean;
 }
 
+export interface TaskCategory {
+  id: string;
+  title: string;
+  color: string;
+}
+
+export const LEGACY_CATEGORIES: readonly TaskCategory[] = [
+  { id: "work", title: "Work", color: "#a78bfa" },
+  { id: "health", title: "Health", color: "#35d97f" },
+  { id: "personal", title: "Personal", color: "#8b9cea" },
+];
+
 export interface TaskList {
   tasks: FocusTask[];
   focusId: string | null;
+  /** Optional on old snapshots; parseTaskList supplies the legacy catalog. */
+  categories?: TaskCategory[];
 }
 
 export interface TaskAdapter {
@@ -49,6 +65,25 @@ export function parseTaskList(input: unknown): TaskList {
   if (!input || typeof input !== "object") throw invalidTasks();
   const value = input as Record<string, unknown>;
   if (!Array.isArray(value.tasks) || value.tasks.length > 16) throw invalidTasks();
+  const rawCategories = value.categories === undefined ? LEGACY_CATEGORIES : value.categories;
+  if (!Array.isArray(rawCategories) || rawCategories.length > 32) throw invalidTasks();
+  const categoryIds = new Set<string>();
+  const categories = rawCategories.map((raw: unknown): TaskCategory => {
+    if (!raw || typeof raw !== "object") throw invalidTasks();
+    const category = raw as Record<string, unknown>;
+    if (
+      !identifier(category.id) ||
+      categoryIds.has(category.id) ||
+      typeof category.title !== "string" ||
+      !category.title.trim() ||
+      new TextEncoder().encode(category.title).length > 63 ||
+      typeof category.color !== "string" ||
+      !/^#[0-9a-fA-F]{6}$/.test(category.color)
+    )
+      throw invalidTasks();
+    categoryIds.add(category.id);
+    return { id: category.id, title: category.title.trim(), color: category.color.toLowerCase() };
+  });
   const seen = new Set<string>();
   const tasks = value.tasks.map((raw: unknown): FocusTask => {
     if (!raw || typeof raw !== "object") throw invalidTasks();
@@ -61,6 +96,8 @@ export function parseTaskList(input: unknown): TaskList {
       task.title.length > 160 ||
       new TextEncoder().encode(task.title).length > 191 ||
       !["work", "health", "personal"].includes(String(task.category)) ||
+      (task.categoryId !== undefined &&
+        (!identifier(task.categoryId) || !categoryIds.has(task.categoryId))) ||
       typeof task.memo !== "string" ||
       new TextEncoder().encode(task.memo).length > 1200 ||
       typeof task.completed !== "boolean" ||
@@ -78,6 +115,7 @@ export function parseTaskList(input: unknown): TaskList {
       id: task.id,
       title: task.title.trim(),
       category: task.category as FocusTask["category"],
+      ...(task.categoryId !== undefined ? { categoryId: task.categoryId as string } : {}),
       memo: task.memo,
       dueAt: task.dueAt as string | null,
       completed: task.completed,
@@ -91,7 +129,7 @@ export function parseTaskList(input: unknown): TaskList {
     )
   )
     throw invalidTasks();
-  return { tasks, focusId: value.focusId as string | null };
+  return { tasks, focusId: value.focusId as string | null, categories };
 }
 
 function invalidTasks(): PocketError {

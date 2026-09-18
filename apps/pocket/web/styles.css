@@ -223,6 +223,19 @@ section {
   letter-spacing: -0.2px;
   flex-shrink: 0;
   color: var(--category-color);
+  max-width: 100%;
+  min-width: 0;
+}
+.category-row .category {
+  flex-shrink: 1;
+}
+.category-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.category .flower {
+  flex-shrink: 0;
 }
 [data-category="work"] {
   --category-color: var(--work);

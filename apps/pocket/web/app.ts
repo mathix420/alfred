@@ -1,14 +1,21 @@
 type Category = "work" | "health" | "personal";
+interface TaskCategory {
+  id: string;
+  title: string;
+  color: string;
+}
 interface Task {
   id: string;
   title: string;
   category: Category;
+  categoryId?: string;
   memo: string;
   dueAt: string | null;
   completed: boolean;
 }
 interface Snapshot {
   tasks: Task[];
+  categories?: TaskCategory[];
   focusId: string | null;
   revision: number;
   mode: "demo" | "live";
@@ -131,9 +138,24 @@ function notice(message: string): void {
     render();
   }, 3400);
 }
-function category(task: Task): string {
-  const labels: Record<Category, string> = { work: "Work", health: "Health", personal: "Personal" };
-  return `<span class="category ${task.category}">${flower()}${labels[task.category]}</span>`;
+const legacyCategories: TaskCategory[] = [
+  { id: "work", title: "Work", color: "#a78bfa" },
+  { id: "health", title: "Health", color: "#35d97f" },
+  { id: "personal", title: "Personal", color: "#8b9cea" },
+];
+function taskCategory(task: Task): TaskCategory {
+  return (
+    snapshot?.categories?.find((item) => item.id === (task.categoryId ?? task.category)) ??
+    legacyCategories.find((item) => item.id === task.category) ??
+    legacyCategories[2]!
+  );
+}
+function categoryAttributes(group: TaskCategory): string {
+  const color = /^#[0-9a-f]{6}$/i.test(group.color) ? group.color : "#8b9cea";
+  return `data-category="${escape(group.id)}" style="--category-color:${color}"`;
+}
+function category(group: TaskCategory): string {
+  return `<span class="category" title="${escape(group.title)}">${flower()}<span class="category-label">${escape(group.title)}</span></span>`;
 }
 function dueLabel(task: Task, short = false): string {
   if (!task.dueAt) return "";
@@ -170,16 +192,17 @@ function focusView(): string {
     return `<div class="page">${status()}<div class="empty-body"><div class="check-wrap">${flower("check-flower")}<svg class="sleepy-eyes" viewBox="0 0 54 16" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"><path d="M2 5q7 8 14 0M34 5q7 8 14 0"/></svg><span class="sleep-z">z</span><span class="sleep-z small">z</span></div><p>${snapshot.mode === "live" && !snapshot.tasks.length ? "Nothing to focus on." : "Good job, enjoy the calm."}</p></div>${hint()}<button class="grabber" data-today aria-label="Open today"></button></div>`;
   const due = dueLabel(task);
   const phase = completion?.phase ?? "";
-  return `<div class="page ${phase}" data-view="focus" data-category="${task.category}">${status()}<button class="focus-body" data-complete="${escape(task.id)}" aria-label="Complete task: ${escape(task.title)}" ${completion ? "disabled" : ""}><span class="category-row">${category(task)}${due ? `<span class="due">${icon("clock")}${escape(due)}</span>` : ""}</span>${check()}<span class="task-title ${task.title.length > 65 ? "long" : ""}">${escape(task.title)}</span></button>${phase === "celebrating" ? '<div class="hint success">Nice.</div>' : phase === "waiting" ? '<div class="hint">Saving…</div>' : hint()}<button class="grabber" data-today aria-label="Open today"></button></div>`;
+  const group = taskCategory(task);
+  return `<div class="page ${phase}" data-view="focus" ${categoryAttributes(group)}>${status()}<button class="focus-body" data-complete="${escape(task.id)}" aria-label="Complete task: ${escape(task.title)}" ${completion ? "disabled" : ""}><span class="category-row">${category(group)}${due ? `<span class="due">${icon("clock")}${escape(due)}</span>` : ""}</span>${check()}<span class="task-title ${task.title.length > 65 ? "long" : ""}">${escape(task.title)}</span></button>${phase === "celebrating" ? '<div class="hint success">Nice.</div>' : phase === "waiting" ? '<div class="hint">Saving…</div>' : hint()}<button class="grabber" data-today aria-label="Open today"></button></div>`;
 }
 function todayView(): string {
   if (!snapshot) return offlineView();
-  const groups: Category[] = ["work", "health", "personal"];
+  const groups = snapshot.categories ?? legacyCategories;
   return `<div class="page list-page"><button class="grabber top" data-back aria-label="Return to focus"></button>${status()}<div class="list-heading"><button class="back-title" data-back aria-label="Today, return to focus">Today</button><div class="count">${flower()}${snapshot.tasks.filter((t) => t.completed).length}/${snapshot.tasks.length}</div></div><div class="scroll-area" data-scroll>${groups
     .map((group) => {
-      const tasks = snapshot!.tasks.filter((t) => t.category === group);
-      if (!tasks[0]) return "";
-      return `<div class="task-section" data-category="${group}">${category(tasks[0])}${tasks.map((task) => `<button class="task-row ${task.id === snapshot?.focusId ? "current" : ""}" data-task="${escape(task.id)}" aria-label="${task.completed ? "Completed: " : "Open memo: "}${escape(task.title)}"><span class="row-check ${task.completed ? "done" : ""}">${flower()}${task.completed ? tick("row-tick") : ""}</span><span class="row-content"><span class="row-label">${escape(task.title)}</span>${task.dueAt && task.id !== snapshot?.focusId ? `<span class="row-due">${icon("clock")}${escape(dueLabel(task, true))}</span>` : ""}</span>${task.id === snapshot?.focusId ? '<span class="now-tag">now</span>' : ""}</button>`).join("")}</div>`;
+      const tasks = snapshot!.tasks.filter((t) => (t.categoryId ?? t.category) === group.id);
+      if (!tasks.length) return "";
+      return `<div class="task-section" ${categoryAttributes(group)}>${category(group)}${tasks.map((task) => `<button class="task-row ${task.id === snapshot?.focusId ? "current" : ""}" data-task="${escape(task.id)}" aria-label="${task.completed ? "Completed: " : "Open memo: "}${escape(task.title)}"><span class="row-check ${task.completed ? "done" : ""}">${flower()}${task.completed ? tick("row-tick") : ""}</span><span class="row-content"><span class="row-label">${escape(task.title)}</span>${task.dueAt && task.id !== snapshot?.focusId ? `<span class="row-due">${icon("clock")}${escape(dueLabel(task, true))}</span>` : ""}</span>${task.id === snapshot?.focusId ? '<span class="now-tag">now</span>' : ""}</button>`).join("")}</div>`;
     })
     .join("")}</div></div>`;
 }

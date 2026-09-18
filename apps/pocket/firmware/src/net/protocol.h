@@ -75,6 +75,16 @@ typedef struct {
 #define ALFRED_TASK_TITLE_MAX 192
 #define ALFRED_TASK_MEMO_MAX 1536
 #define ALFRED_REQUEST_ID_MAX 64
+#define ALFRED_CATEGORIES_MAX 32
+#define ALFRED_CATEGORY_ID_MAX 64
+#define ALFRED_CATEGORY_TITLE_MAX 64
+
+// Optional TodoMate list catalog; array order is the user's list order.
+typedef struct {
+  char id[ALFRED_CATEGORY_ID_MAX];
+  char title[ALFRED_CATEGORY_TITLE_MAX];
+  char color[8]; // #RRGGBB, validated by the decoder
+} alfred_focus_category_t;
 
 typedef enum { TASK_WORK, TASK_HEALTH, TASK_PERSONAL } alfred_task_category_t;
 typedef struct {
@@ -82,12 +92,17 @@ typedef struct {
   char title[ALFRED_TASK_TITLE_MAX];
   char memo[ALFRED_TASK_MEMO_MAX];
   char due_at[40];
+  char category_id[ALFRED_CATEGORY_ID_MAX];
+  // Legacy fallback for snapshots without a matching catalog entry.
   alfred_task_category_t category;
   bool completed;
 } alfred_focus_task_t;
 typedef struct {
   alfred_focus_task_t tasks[ALFRED_TASKS_MAX];
   size_t count;
+  alfred_focus_category_t categories[ALFRED_CATEGORIES_MAX];
+  size_t category_count;
+  bool has_categories;
   char focus_id[ALFRED_TASK_ID_MAX];
   uint32_t revision;
   bool demo;

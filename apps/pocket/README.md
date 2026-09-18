@@ -198,6 +198,11 @@ See [Hermes Matrix setup](https://hermes-agent.nousresearch.com/docs/user-guide/
 Alfred polls `GET /api/tasks?include_unscheduled=true` and completes exactly the
 upstream task through `POST /api/tasks/{id}/complete` with `{ "completed": true }`.
 TodoMate's server timezone determines today. Set `TZ=Europe/Paris` on both services.
+The task snapshot also carries TodoMate's list IDs, names, colors, and order.
+Focus and Today use that catalog instead of assigning tasks to three generic
+categories. Lists without displayed tasks are hidden in Today. Updated firmware and
+the browser use the catalog; earlier firmware can still read the legacy category
+field until it is flashed.
 Memos and native reminder timestamps come from TodoMate; a date without a reminder
 does not become an invented deadline. Pending tasks with the earliest reminder
 come first, followed by TodoMate order. Up to 16 tasks fit the device snapshot.

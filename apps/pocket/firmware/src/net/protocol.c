@@ -40,6 +40,39 @@ static bool get_str_field(const cJSON *obj, const char *key, char *dst,
   return true;
 }
 
+// Category identifiers must match exactly; truncation could merge two lists.
+static bool get_bounded_string(const cJSON *obj, const char *key, char *dst,
+                               size_t capacity) {
+  const cJSON *value = cJSON_GetObjectItemCaseSensitive(obj, key);
+  if (!cJSON_IsString(value) || !value->valuestring ||
+      !value->valuestring[0] || strlen(value->valuestring) >= capacity)
+    return false;
+  copy_str(dst, capacity, value->valuestring);
+  return true;
+}
+static bool category_identifier(const char *id) {
+  if (!((id[0] >= 'a' && id[0] <= 'z') ||
+        (id[0] >= 'A' && id[0] <= 'Z') ||
+        (id[0] >= '0' && id[0] <= '9')))
+    return false;
+  for (const unsigned char *p = (const unsigned char *)id; *p; ++p)
+    if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+          (*p >= '0' && *p <= '9') || *p == '_' || *p == '-' ||
+          *p == '.' || *p == ':'))
+      return false;
+  return id[0] != 0;
+}
+static bool category_hex_color(const char *hex) {
+  if (strlen(hex) != 7 || hex[0] != '#')
+    return false;
+  for (size_t i = 1; i < 7; ++i)
+    if (!((hex[i] >= '0' && hex[i] <= '9') ||
+          (hex[i] >= 'a' && hex[i] <= 'f') ||
+          (hex[i] >= 'A' && hex[i] <= 'F')))
+      return false;
+  return true;
+}
+
 // -----------------------------------------------------------------------------
 // String tables (kept in lockstep with the TS literal unions)
 // -----------------------------------------------------------------------------
@@ -343,7 +376,31 @@ static alfred_parse_result_t parse_focus(const cJSON *root,
   out->online = strcmp(connection->valuestring, "online") == 0;
   out->configured = strcmp(connection->valuestring, "unconfigured") != 0;
   get_str_field(snap, "focusId", out->focus_id, sizeof(out->focus_id));
+  const cJSON *categories = cJSON_GetObjectItemCaseSensitive(snap, "categories");
   const cJSON *item;
+  if (categories) {
+    if (!cJSON_IsArray(categories))
+      return ALFRED_PARSE_BAD_FIELD;
+    out->has_categories = true;
+    cJSON_ArrayForEach(item, categories) {
+      if (out->category_count >= ALFRED_CATEGORIES_MAX)
+        return ALFRED_PARSE_BAD_FIELD;
+      alfred_focus_category_t *category =
+          &out->categories[out->category_count];
+      if (!get_bounded_string(item, "id", category->id, sizeof(category->id)) ||
+          !category_identifier(category->id) ||
+          !get_bounded_string(item, "title", category->title,
+                              sizeof(category->title)) ||
+          !get_bounded_string(item, "color", category->color,
+                              sizeof(category->color)) ||
+          !category_hex_color(category->color))
+        return ALFRED_PARSE_BAD_FIELD;
+      for (size_t i = 0; i < out->category_count; ++i)
+        if (!strcmp(out->categories[i].id, category->id))
+          return ALFRED_PARSE_BAD_FIELD;
+      out->category_count++;
+    }
+  }
   cJSON_ArrayForEach(item, tasks) {
     if (out->count >= ALFRED_TASKS_MAX)
       return ALFRED_PARSE_BAD_FIELD;
@@ -364,6 +421,11 @@ static alfred_parse_result_t parse_focus(const cJSON *root,
     else if (!strcmp(category, "personal"))
       task->category = TASK_PERSONAL;
     else
+      return ALFRED_PARSE_BAD_FIELD;
+    if (cJSON_GetObjectItemCaseSensitive(item, "categoryId") &&
+        (!get_bounded_string(item, "categoryId", task->category_id,
+                              sizeof(task->category_id)) ||
+         !category_identifier(task->category_id)))
       return ALFRED_PARSE_BAD_FIELD;
     get_str_field(item, "memo", task->memo, sizeof(task->memo));
     get_str_field(item, "dueAt", task->due_at, sizeof(task->due_at));

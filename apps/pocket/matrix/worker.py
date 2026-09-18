@@ -76,7 +76,8 @@ def voice_content(file_info: dict, uri: str, size: int, duration_ms: int, hermes
         raise BridgeError("matrix_attachment_invalid")
     return {
         "msgtype": ROOM_AUDIO_TYPE,
-        "body": "Voice message",
+        # Different body/filename values are a media caption in Matrix v1.10+.
+        "body": "voice.wav",
         "filename": "voice.wav",
         "info": {"mimetype": "audio/wav", "size": size, "duration": duration_ms},
         "file": {**file_info, "url": uri},

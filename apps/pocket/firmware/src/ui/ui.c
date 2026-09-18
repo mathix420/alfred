@@ -100,6 +100,25 @@ static uint32_t category_color(alfred_task_category_t c) {
 static const char *category_name(alfred_task_category_t c) {
   return c == TASK_HEALTH ? "Health" : c == TASK_PERSONAL ? "Personal" : "Work";
 }
+static const alfred_focus_category_t *task_category(
+    const alfred_focus_task_t *task) {
+  if (task->category_id[0])
+    for (size_t i = 0; i < s.snapshot->category_count; ++i)
+      if (!strcmp(task->category_id, s.snapshot->categories[i].id))
+        return &s.snapshot->categories[i];
+  return NULL;
+}
+static uint32_t catalog_color(const alfred_focus_category_t *category) {
+  return (uint32_t)strtoul(category->color + 1, NULL, 16);
+}
+static uint32_t task_color(const alfred_focus_task_t *task) {
+  const alfred_focus_category_t *category = task_category(task);
+  return category ? catalog_color(category) : category_color(task->category);
+}
+static const char *task_category_name(const alfred_focus_task_t *task) {
+  const alfred_focus_category_t *category = task_category(task);
+  return category ? category->title : category_name(task->category);
+}
 static int find_task(const char *id) {
   for (size_t i = 0; i < s.snapshot->count; ++i)
     if (!strcmp(id, s.snapshot->tasks[i].id))
@@ -271,19 +290,28 @@ static void battery_draw(lv_event_t *e) {
   } else
     draw_line(layer, a.x1 + 6, a.y1 + 10, a.x1 + 11, a.y1 + 10, 1, POCKET_DIM);
 }
-static int pill(lv_obj_t *parent, int x, int y, alfred_task_category_t category,
-                bool small) {
-  int width = category == TASK_PERSONAL ? 115
-              : category == TASK_HEALTH ? 101
-                                        : 91;
+static int text_width(const char *text, const lv_font_t *font) {
+  lv_point_t size;
+  lv_text_get_size(&size, text, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+  return size.x;
+}
+static int pill(lv_obj_t *parent, int x, int y, const char *name, uint32_t hex,
+                bool small, int max_width) {
+  int width = text_width(name, &inter_17) + 44;
+  if (width < 64)
+    width = 64;
+  if (width > max_width)
+    width = max_width;
   int height = small ? 30 : 38;
   lv_obj_t *o = box(parent, x, y, width, height);
   lv_obj_set_style_bg_color(o, color(POCKET_SURFACE), 0);
   lv_obj_set_style_bg_opa(o, 255, 0);
   lv_obj_set_style_radius(o, LV_RADIUS_CIRCLE, 0);
-  flower(o, 13, small ? 9 : 12, 13, category_color(category), false);
-  label(o, 33, small ? 5 : 8, width - 37, category_name(category), &inter_17,
-        category_color(category));
+  flower(o, 13, small ? 9 : 12, 13, hex, false);
+  lv_obj_t *name_label =
+      label(o, 33, small ? 5 : 8, width - 44, name, &inter_17, hex);
+  lv_obj_set_height(name_label, lv_font_get_line_height(&inter_17));
+  lv_label_set_long_mode(name_label, LV_LABEL_LONG_DOT);
   return width;
 }
 static void set_hint(const char *text, uint32_t hex, bool microphone) {
@@ -530,15 +558,23 @@ static void build_focus(void) {
                         &inter_17, POCKET_SECONDARY);
     lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
   } else {
-    int pw = pill(s.body, 24, 78, task->category, false);
-    if (!s.completing) {
-      char due[48];
+    char due[48] = {0};
+    if (!s.completing)
       format_due(task->due_at, due, sizeof(due));
-      label(s.body, 24 + pw + 12, 89, 202, due, &inter_14, POCKET_SECONDARY);
+    int due_width = due[0] ? text_width(due, &inter_14) : 0;
+    if (due_width > 146)
+      due_width = 146;
+    int pw = pill(s.body, 24, 78, task_category_name(task), task_color(task),
+                   false, due_width ? 320 - due_width - 12 : 320);
+    if (due_width) {
+      lv_obj_t *due_label = label(s.body, 24 + pw + 12, 89, 320 - pw - 12,
+                                  due, &inter_14, POCKET_SECONDARY);
+      lv_obj_set_height(due_label, lv_font_get_line_height(&inter_14));
+      lv_label_set_long_mode(due_label, LV_LABEL_LONG_DOT);
     }
     s.hero =
         flower(s.body, 32, 146, 120,
-               s.completing ? category_color(task->category) : POCKET_UNCHECKED,
+               s.completing ? task_color(task) : POCKET_UNCHECKED,
                s.completing);
     s.title = label(s.body, 24, 297, 320, task->title, &inter_34, POCKET_TEXT);
     lv_obj_set_style_text_letter_space(s.title, -1, 0);
@@ -561,7 +597,7 @@ static void build_focus(void) {
   }
   if (s.completing)
     set_hint(s.acknowledged ? "Nice." : "Saving...",
-             task ? category_color(task->category) : POCKET_SECONDARY, false);
+             task ? task_color(task) : POCKET_SECONDARY, false);
   else if (s.note[0]) {
     set_hint(s.note, 0xE8927C, false);
     lv_label_set_long_mode(s.hint, LV_LABEL_LONG_SCROLL_CIRCULAR);
@@ -573,6 +609,54 @@ static void row_clicked(lv_event_t *e) {
     return;
   s.selected = (int)(intptr_t)lv_event_get_user_data(e);
   show_page(PAGE_FOCUS);
+}
+static bool task_in_group(const alfred_focus_task_t *task,
+                           const alfred_focus_category_t *category,
+                           alfred_task_category_t fallback) {
+  const alfred_focus_category_t *matched = task_category(task);
+  return category ? matched == category
+                  : !matched && task->category == fallback;
+}
+static int today_group(lv_obj_t *list, int y,
+                        const alfred_focus_category_t *category,
+                        alfred_task_category_t fallback) {
+  bool any = false;
+  for (size_t i = 0; i < s.snapshot->count; ++i)
+    if (task_in_group(&s.snapshot->tasks[i], category, fallback))
+      any = true;
+  // The catalog preserves list identity/order; empty lists stay off the device.
+  if (!any)
+    return y;
+  pill(list, 10, y, category ? category->title : category_name(fallback),
+        category ? catalog_color(category) : category_color(fallback), true,
+        300);
+  y += 34;
+  for (size_t i = 0; i < s.snapshot->count; ++i) {
+    alfred_focus_task_t *task = &s.snapshot->tasks[i];
+    if (!task_in_group(task, category, fallback))
+      continue;
+    bool active = (int)i == active_index();
+    lv_obj_t *row = box(list, 0, y, 320, 60);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    if (active) {
+      lv_obj_set_style_bg_color(row, color(0x161618), 0);
+      lv_obj_set_style_bg_opa(row, 255, 0);
+      lv_obj_set_style_radius(row, 14, 0);
+    }
+    flower(row, 10, 9, 38,
+           task->completed ? task_color(task) : POCKET_UNCHECKED,
+           task->completed);
+    lv_obj_t *l = label(row, 60, 6, active ? 220 : 253, task->title,
+                        &inter_20, POCKET_TEXT);
+    lv_obj_set_height(l, 50);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+    if (active)
+      label(row, 283, 22, 36, "now", &inter_14, task_color(task));
+    lv_obj_add_event_cb(row, row_clicked, LV_EVENT_SHORT_CLICKED,
+                        (void *)(intptr_t)i);
+    y += 62;
+  }
+  return y + 10;
 }
 static void build_today(void) {
   label(s.body, 24, 49, 200, "Today", &inter_23, POCKET_TEXT);
@@ -587,42 +671,10 @@ static void build_today(void) {
   lv_obj_t *list = scroll_view(s.body, 24, 84, 344, 348);
   s.scroll = list;
   int y = 0;
-  for (int category = TASK_WORK; category <= TASK_PERSONAL; category++) {
-    bool any = false;
-    for (size_t i = 0; i < s.snapshot->count; i++)
-      if (s.snapshot->tasks[i].category == category)
-        any = true;
-    if (!any)
-      continue;
-    pill(list, 10, y, category, true);
-    y += 34;
-    for (size_t i = 0; i < s.snapshot->count; i++) {
-      alfred_focus_task_t *task = &s.snapshot->tasks[i];
-      if (task->category != category)
-        continue;
-      bool active = (int)i == active_index();
-      lv_obj_t *row = box(list, 0, y, 320, 60);
-      lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
-      if (active) {
-        lv_obj_set_style_bg_color(row, color(0x161618), 0);
-        lv_obj_set_style_bg_opa(row, 255, 0);
-        lv_obj_set_style_radius(row, 14, 0);
-      }
-      flower(row, 10, 9, 38,
-             task->completed ? category_color(task->category) : POCKET_UNCHECKED,
-             task->completed);
-      lv_obj_t *l = label(row, 60, 6, active ? 220 : 253, task->title,
-                          &inter_20, POCKET_TEXT);
-      lv_obj_set_height(l, 50);
-      lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
-      if (active)
-        label(row, 283, 22, 36, "now", &inter_14, category_color(task->category));
-      lv_obj_add_event_cb(row, row_clicked, LV_EVENT_SHORT_CLICKED,
-                          (void *)(intptr_t)i);
-      y += 62;
-    }
-    y += 10;
-  }
+  for (size_t i = 0; i < s.snapshot->category_count; ++i)
+    y = today_group(list, y, &s.snapshot->categories[i], TASK_WORK);
+  for (int legacy = TASK_WORK; legacy <= TASK_PERSONAL; ++legacy)
+    y = today_group(list, y, NULL, (alfred_task_category_t)legacy);
   lv_obj_add_flag(s.footer, LV_OBJ_FLAG_HIDDEN);
 }
 static void update_memo_affordances(void) {

@@ -7,6 +7,8 @@ Matrix. The device does not transcribe, display replies, or play spoken replies.
 
 ## Interface
 
+- Task groups use your TodoMate list names, colors, and order. Today hides lists
+  without displayed tasks. Completed flowers keep their list's color.
 - Tap the focus task to complete it. The backend acknowledges the saved change
   before the flower/check animation reveals the next task. Completed task
   flowers keep their category color in Focus and Today.
@@ -79,6 +81,13 @@ settings take precedence. BLE provisioning is not implemented.
 ## Protocol and source
 
 Protocol 2 uses WebSocket JSON controls and outbound 16 kHz mono PCM16 audio.
+The ES8311 microphone uses the left I2S receive slot explicitly. On ESP32-S3,
+mono capture with both slots duplicates samples and makes a 16 kHz recording
+play at half speed; see [Espressif's I2S validation notes](https://github.com/espressif/arduino-esp32/blob/master/tests/validation/i2s/README.md).
+After each recording, the USB log reports captured sample count, capture time,
+and PCM duration. For a recording of several seconds, PCM duration should be
+close to the time held, with about 16,000 samples per second.
+
 The device sends `hello`, `complete_task`, `refresh`, `ptt_down`, binary recording
 chunks, `ptt_up`, and `cancel`. The backend supplies `hello`, `focus`,
 `task_completed`, `state`, and `error` messages. The voice sequence is

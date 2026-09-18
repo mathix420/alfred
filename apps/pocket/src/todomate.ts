@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { TaskAdapter } from "./types";
+import type { TaskAdapter, TaskCategory } from "./types";
 import { identifier, parseTaskList, PocketError, type FocusTask, type TaskList } from "./types";
 
 export interface TodoMateApiConfig {
@@ -15,12 +15,16 @@ interface ApiTask {
   dueAt: string | null;
   completed: boolean;
 }
+interface ApiGoal {
+  category: TaskCategory;
+}
 type Fetcher = (url: string, init: RequestInit) => Promise<Response>;
 
 /** TodoMate is authoritative, including tasks reopened from another client. */
 export class TodoMateApiAdapter implements TaskAdapter {
   readonly authoritativeCompletions = true;
   private readonly upstreamIds = new Map<string, string>();
+  private categoryOrder = new Map<string, number>();
   private latest: TaskList = { tasks: [], focusId: null };
   constructor(
     private readonly config: TodoMateApiConfig,
@@ -37,14 +41,42 @@ export class TodoMateApiAdapter implements TaskAdapter {
       !isObject(raw) ||
       !Array.isArray(raw.tasks) ||
       !Array.isArray(raw.goals) ||
-      raw.tasks.length > 10000
+      raw.tasks.length > 10000 ||
+      raw.goals.length > 10000
     )
       throw invalidResponse();
-    const goals = new Map<string, string>();
+    const goals = new Map<string, ApiGoal>();
+    const categoryIds = new Set<string>();
     for (const goal of raw.goals as unknown[]) {
-      if (!isObject(goal) || typeof goal.id !== "string" || typeof goal.title !== "string")
+      if (
+        !isObject(goal) ||
+        typeof goal.id !== "string" ||
+        !goal.id ||
+        goal.id.length > 1024 ||
+        goals.has(goal.id) ||
+        typeof goal.title !== "string" ||
+        (goal.status !== undefined && typeof goal.status !== "string") ||
+        (goal.color !== undefined &&
+          goal.color !== null &&
+          (typeof goal.color !== "number" ||
+            !Number.isInteger(goal.color) ||
+            goal.color < 0 ||
+            goal.color > 0xffffffff))
+      )
         throw invalidResponse();
-      goals.set(goal.id, goal.title);
+      const id = deviceId(goal.id);
+      if (categoryIds.has(id)) throw invalidResponse();
+      categoryIds.add(id);
+      goals.set(goal.id, {
+        category: {
+          id,
+          title: fit(goal.title.trim() || "Untitled list", 60),
+          color:
+            typeof goal.color === "number"
+              ? `#${(goal.color & 0xffffff).toString(16).padStart(6, "0")}`
+              : "#8f8f98",
+        },
+      });
     }
     const seen = new Set<string>();
     const tasks = raw.tasks.map(parseTask).map((task) => {
@@ -65,7 +97,11 @@ export class TodoMateApiAdapter implements TaskAdapter {
     this.latest = parseTaskList({
       tasks: visible,
       focusId: visible.find((task) => !task.completed)?.id ?? null,
+      categories: visibleCategories(goals, visible),
     });
+    this.categoryOrder = new Map(
+      [...goals.values()].map((goal, index) => [goal.category.id, index]),
+    );
     return structuredClone(this.latest);
   }
 
@@ -94,15 +130,37 @@ export class TodoMateApiAdapter implements TaskAdapter {
       );
     // The confirmed write is sufficient to acknowledge completion. A failed follow-up
     // list read must not make a successful upstream write look like a failed tap.
+    const previousCategory = this.latest.categories?.find(
+      (category) => category.id === task.categoryId,
+    );
     let next: TaskList;
     try {
       next = await this.readTasks(signal);
     } catch {
       next = structuredClone(this.latest);
     }
-    const completed = { ...task, completed: true };
+    const completed = {
+      ...(next.tasks.find((item) => item.id === task.id) ?? task),
+      completed: true,
+    };
+    const completedCategory = completed.categoryId;
+    if (
+      completedCategory &&
+      !next.categories?.some((category) => category.id === completedCategory)
+    ) {
+      if (previousCategory) {
+        next.categories = [...(next.categories ?? []), previousCategory];
+      }
+    }
     next.tasks = next.tasks.filter((item) => item.id !== task.id).slice(0, 15);
     next.tasks.push(completed);
+    const visibleGroups = new Set(next.tasks.map((item) => item.categoryId));
+    next.categories = next.categories
+      ?.filter((category) => visibleGroups.has(category.id))
+      .sort(
+        (a, b) =>
+          (this.categoryOrder.get(a.id) ?? Infinity) - (this.categoryOrder.get(b.id) ?? Infinity),
+      );
     next.focusId = next.tasks.find((item) => !item.completed)?.id ?? null;
     this.latest = parseTaskList(next);
     return structuredClone(this.latest);
@@ -210,8 +268,8 @@ function parseTask(value: unknown): ApiTask {
     throw invalidResponse();
   return value as unknown as ApiTask;
 }
-function toFocusTask(task: ApiTask, goals: Map<string, string>): FocusTask {
-  const label = (goals.get(task.goalId ?? "") ?? "").toLowerCase();
+function toFocusTask(task: ApiTask, goals: Map<string, ApiGoal>): FocusTask {
+  const label = (goals.get(task.goalId ?? "")?.category.title ?? "").toLowerCase();
   const category = /work|travail|boulot|profession|business/.test(label)
     ? "work"
     : /health|santé|sante|sport|fitness|wellness/.test(label)
@@ -221,8 +279,21 @@ function toFocusTask(task: ApiTask, goals: Map<string, string>): FocusTask {
     id: deviceId(task.id),
     title: fit(task.title.trim(), 188, 157),
     category,
+    categoryId: task.goalId ? deviceId(task.goalId) : deviceId("\0alfred-uncategorized"),
     memo: fit(task.memo ?? "", 1197),
     dueAt: task.dueAt ? new Date(task.dueAt).toISOString() : null,
     completed: task.completed,
   };
+}
+
+function visibleCategories(goals: Map<string, ApiGoal>, tasks: FocusTask[]): TaskCategory[] {
+  const required = new Set(tasks.map((task) => task.categoryId!));
+  const categories = [...goals.values()]
+    .filter((goal) => required.has(goal.category.id))
+    .map((goal) => goal.category);
+  const known = new Set(categories.map((category) => category.id));
+  for (const id of required) {
+    if (!known.has(id)) categories.push({ id, title: "Uncategorized", color: "#8f8f98" });
+  }
+  return categories;
 }
