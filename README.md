@@ -17,6 +17,17 @@ Cloud credentials stay on the backend. With no credentials, it runs an interacti
 
 Actual app preview at the device’s 368 × 448 layout, using demo data.
 
+Swipe left from the right edge of Focus to open Start, Pause, and Stop controls;
+swipe right to close them. The timer stays synchronized with TodoMate. Stop saves
+the elapsed time and completes the task. Select a checked task in Today and tap
+its flower to reopen it.
+
+| Running timer                                                                                                              | Paused timer                                                                                                        |
+| -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| <img src="docs/screenshots/timer.png" width="184" alt="Native timer dock with elapsed time and pause and stop controls" /> | <img src="docs/screenshots/timer-paused.png" width="184" alt="Native paused timer with resume and stop controls" /> |
+
+Native LVGL rendering at 368 × 448, using sample tasks.
+
 ```sh
 bun install --frozen-lockfile
 bun run dev                 # http://127.0.0.1:9191

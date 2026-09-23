@@ -6,6 +6,7 @@
 #include "protocol.h"
 
 #include <string.h>
+#include <stdio.h>
 
 #include "cJSON.h" // bundled with ESP-IDF (components/json)
 
@@ -194,15 +195,45 @@ char *alfred_encode_ptt_down(void) {
 }
 char *alfred_encode_refresh(void) { return encode_bare("refresh"); }
 char *alfred_encode_cancel(void) { return encode_bare("cancel"); }
-char *alfred_encode_complete_task(const char *id, const char *request_id) {
+static char *encode_task_action(const char *type, const char *id,
+                                const char *request_id) {
   if (!id || !request_id)
     return NULL;
   cJSON *root = cJSON_CreateObject();
   if (!root)
     return NULL;
-  if (!cJSON_AddStringToObject(root, "type", "complete_task") ||
+  if (!cJSON_AddStringToObject(root, "type", type) ||
       !cJSON_AddStringToObject(root, "id", id) ||
       !cJSON_AddStringToObject(root, "requestId", request_id)) {
+    cJSON_Delete(root);
+    return NULL;
+  }
+  return finish(root);
+}
+char *alfred_encode_complete_task(const char *id, const char *request_id) {
+  return encode_task_action("complete_task", id, request_id);
+}
+char *alfred_encode_reopen_task(const char *id, const char *request_id) {
+  return encode_task_action("reopen_task", id, request_id);
+}
+const char *alfred_task_timer_action_str(alfred_task_timer_action_t action) {
+  switch (action) {
+  case ALFRED_TIMER_START: return "start";
+  case ALFRED_TIMER_PAUSE: return "pause";
+  case ALFRED_TIMER_STOP: return "stop";
+  default: return NULL;
+  }
+}
+char *alfred_encode_task_timer(const char *id, const char *request_id,
+                                alfred_task_timer_action_t action) {
+  const char *name = alfred_task_timer_action_str(action);
+  if (!id || !request_id || !name) return NULL;
+  cJSON *root = cJSON_CreateObject();
+  if (!root) return NULL;
+  if (!cJSON_AddStringToObject(root, "type", "task_timer") ||
+      !cJSON_AddStringToObject(root, "id", id) ||
+      !cJSON_AddStringToObject(root, "requestId", request_id) ||
+      !cJSON_AddStringToObject(root, "action", name)) {
     cJSON_Delete(root);
     return NULL;
   }
@@ -246,6 +277,8 @@ static alfred_server_msg_type_t server_type_of(const char *type) {
       {"hello", ALFRED_SRV_WELCOME},
       {"focus", ALFRED_SRV_FOCUS},
       {"task_completed", ALFRED_SRV_TASK_COMPLETED},
+      {"task_reopened", ALFRED_SRV_TASK_REOPENED},
+      {"task_timer_updated", ALFRED_SRV_TASK_TIMER_UPDATED},
       {"welcome", ALFRED_SRV_WELCOME},
       {"state", ALFRED_SRV_STATE},
       {"transcript", ALFRED_SRV_TRANSCRIPT},
@@ -359,6 +392,37 @@ static alfred_parse_result_t parse_reminders(const cJSON *root,
   return ALFRED_PARSE_OK;
 }
 
+// The server normalizes timer timestamps to YYYY-MM-DDTHH:MM:SS.sssZ.
+// Convert Gregorian dates directly so timezone settings cannot affect elapsed time.
+static bool timer_timestamp(const char *text, int64_t *out) {
+  if (!text || strlen(text) != 24) return false;
+  const char *shape = "0000-00-00T00:00:00.000Z";
+  for (size_t i = 0; i < 24; ++i)
+    if (shape[i] == '0' ? (text[i] < '0' || text[i] > '9') : text[i] != shape[i])
+      return false;
+  int year, month, day, hour, minute, second, millis;
+  if (sscanf(text, "%4d-%2d-%2dT%2d:%2d:%2d.%3dZ", &year, &month, &day,
+             &hour, &minute, &second, &millis) != 7 ||
+      year < 1970 || month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59)
+    return false;
+  const int month_days[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+  bool leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+  if (day < 1 || day > month_days[month - 1] + (month == 2 && leap)) return false;
+  int64_t previous = year - 1;
+  int64_t days = (int64_t)(year - 1970) * 365 + previous / 4 - 1969 / 4 -
+                 previous / 100 + 1969 / 100 + previous / 400 - 1969 / 400;
+  for (int m = 1; m < month; ++m) days += month_days[m - 1] + (m == 2 && leap);
+  days += day - 1;
+  *out = ((days * 24 + hour) * 3600 + minute * 60 + second) * 1000 + millis;
+  return *out > 0;
+}
+static bool timer_seconds(const cJSON *value, uint32_t *out) {
+  if (!cJSON_IsNumber(value) || value->valuedouble < 0 || value->valuedouble > 72000)
+    return false;
+  *out = (uint32_t)value->valuedouble;
+  return (double)*out == value->valuedouble;
+}
+
 static alfred_parse_result_t parse_focus(const cJSON *root,
                                          alfred_focus_snapshot_t *out) {
   const cJSON *snap = cJSON_GetObjectItemCaseSensitive(root, "snapshot");
@@ -430,6 +494,23 @@ static alfred_parse_result_t parse_focus(const cJSON *root,
     get_str_field(item, "memo", task->memo, sizeof(task->memo));
     get_str_field(item, "dueAt", task->due_at, sizeof(task->due_at));
     task->completed = cJSON_IsTrue(completed);
+    const cJSON *timer = cJSON_GetObjectItemCaseSensitive(item, "timer");
+    if (timer && !cJSON_IsNull(timer)) {
+      const cJSON *started = cJSON_GetObjectItemCaseSensitive(timer, "startedAt");
+      if (!cJSON_IsObject(timer) ||
+          !timer_seconds(cJSON_GetObjectItemCaseSensitive(timer, "elapsedSeconds"),
+                         &task->timer_elapsed_seconds))
+        return ALFRED_PARSE_BAD_FIELD;
+      if (!cJSON_IsNull(started) &&
+          (!cJSON_IsString(started) || !timer_timestamp(started->valuestring, &task->timer_started_at_ms)))
+        return ALFRED_PARSE_BAD_FIELD;
+      task->has_timer = true;
+    }
+    const cJSON *spent = cJSON_GetObjectItemCaseSensitive(item, "spentTimeSeconds");
+    if (spent && !cJSON_IsNull(spent)) {
+      if (!timer_seconds(spent, &task->spent_time_seconds)) return ALFRED_PARSE_BAD_FIELD;
+      task->has_spent_time = true;
+    }
     out->count++;
   }
   return ALFRED_PARSE_OK;
@@ -467,12 +548,29 @@ alfred_parse_result_t alfred_parse_server_msg(const char *json,
     res = parse_focus(root, &out->as.focus);
     break;
   case ALFRED_SRV_TASK_COMPLETED:
+  case ALFRED_SRV_TASK_REOPENED:
     if (!get_str_field(root, "id", out->as.task_completed.id,
                        sizeof(out->as.task_completed.id)) ||
         !get_str_field(root, "requestId", out->as.task_completed.request_id,
                        sizeof(out->as.task_completed.request_id)))
       res = ALFRED_PARSE_BAD_FIELD;
     break;
+  case ALFRED_SRV_TASK_TIMER_UPDATED: {
+    char action[8];
+    if (!get_bounded_string(root, "id", out->as.task_timer_updated.id,
+                            sizeof(out->as.task_timer_updated.id)) ||
+        !get_bounded_string(root, "requestId", out->as.task_timer_updated.request_id,
+                            sizeof(out->as.task_timer_updated.request_id)) ||
+        !get_bounded_string(root, "action", action, sizeof(action))) {
+      res = ALFRED_PARSE_BAD_FIELD;
+      break;
+    }
+    if (!strcmp(action, "start")) out->as.task_timer_updated.action = ALFRED_TIMER_START;
+    else if (!strcmp(action, "pause")) out->as.task_timer_updated.action = ALFRED_TIMER_PAUSE;
+    else if (!strcmp(action, "stop")) out->as.task_timer_updated.action = ALFRED_TIMER_STOP;
+    else res = ALFRED_PARSE_BAD_FIELD;
+    break;
+  }
   case ALFRED_SRV_WELCOME: {
     get_str_field(root, "sessionId", out->as.welcome.session_id,
                   sizeof(out->as.welcome.session_id));

@@ -1,6 +1,16 @@
 import { createHash } from "node:crypto";
-import type { TaskAdapter, TaskCategory } from "./types";
-import { identifier, parseTaskList, PocketError, type FocusTask, type TaskList } from "./types";
+import type { TaskAdapter, TaskCategory, TaskTimer, TaskTimerAction, TaskMutation } from "./types";
+import {
+  identifier,
+  parseTaskList,
+  parseTaskTimer,
+  parseSpentSeconds,
+  taskTimerAction,
+  mutationConfirmed,
+  PocketError,
+  type FocusTask,
+  type TaskList,
+} from "./types";
 
 export interface TodoMateApiConfig {
   baseUrl: string;
@@ -14,6 +24,8 @@ interface ApiTask {
   memo: string | null;
   dueAt: string | null;
   completed: boolean;
+  timer?: TaskTimer | null;
+  spentTimeSeconds?: number | null;
 }
 interface ApiGoal {
   category: TaskCategory;
@@ -106,29 +118,63 @@ export class TodoMateApiAdapter implements TaskAdapter {
   }
 
   async completeTask(task: FocusTask, requestId: string, signal?: AbortSignal): Promise<TaskList> {
+    return this.changeTask(task, "complete", requestId, signal);
+  }
+
+  async reopenTask(task: FocusTask, requestId: string, signal?: AbortSignal): Promise<TaskList> {
+    return this.changeTask(task, "reopen", requestId, signal);
+  }
+
+  async updateTimer(
+    task: FocusTask,
+    action: TaskTimerAction,
+    requestId: string,
+    signal?: AbortSignal,
+  ): Promise<TaskList> {
+    return this.changeTask(task, action, requestId, signal);
+  }
+
+  private async changeTask(
+    task: FocusTask,
+    action: TaskMutation,
+    requestId: string,
+    signal?: AbortSignal,
+  ): Promise<TaskList> {
     // A persisted pocket snapshot can outlive this adapter's in-memory ID map.
     if (!this.upstreamIds.has(task.id)) await this.readTasks(signal);
     const upstreamId = this.upstreamIds.get(task.id);
     if (!upstreamId)
       throw new PocketError("task_missing", "This task has changed. Refresh your list.", 404);
     const response = await this.request(
-      `/api/tasks/${encodeURIComponent(upstreamId)}/complete`,
+      `/api/tasks/${encodeURIComponent(upstreamId)}/${taskTimerAction(action) ? "timer" : "complete"}`,
       {
         method: "POST",
         headers: { "Idempotency-Key": requestId },
-        body: JSON.stringify({ completed: true }),
+        body: JSON.stringify(
+          taskTimerAction(action) ? { action } : { completed: action === "complete" },
+        ),
       },
       signal,
     );
     if (!isObject(response) || !isObject(response.task)) throw invalidResponse();
     const confirmed = parseTask(response.task);
-    if (confirmed.id !== upstreamId || !confirmed.completed)
+    if (
+      confirmed.id !== upstreamId ||
+      !mutationConfirmed(
+        { ...task, ...timingFields(confirmed), completed: confirmed.completed },
+        action,
+      )
+    )
       throw new PocketError(
-        "completion_unconfirmed",
+        action === "complete"
+          ? "completion_unconfirmed"
+          : action === "reopen"
+            ? "reopen_unconfirmed"
+            : "timer_unconfirmed",
         "TodoMate could not confirm this task was saved.",
         502,
       );
-    // The confirmed write is sufficient to acknowledge completion. A failed follow-up
+    // The confirmed write is sufficient to acknowledge the change. A failed follow-up
     // list read must not make a successful upstream write look like a failed tap.
     const previousCategory = this.latest.categories?.find(
       (category) => category.id === task.categoryId,
@@ -139,11 +185,12 @@ export class TodoMateApiAdapter implements TaskAdapter {
     } catch {
       next = structuredClone(this.latest);
     }
-    const completed = {
+    const updated = {
       ...(next.tasks.find((item) => item.id === task.id) ?? task),
-      completed: true,
+      ...timingFields(confirmed),
+      completed: confirmed.completed,
     };
-    const completedCategory = completed.categoryId;
+    const completedCategory = updated.categoryId;
     if (
       completedCategory &&
       !next.categories?.some((category) => category.id === completedCategory)
@@ -153,7 +200,7 @@ export class TodoMateApiAdapter implements TaskAdapter {
       }
     }
     next.tasks = next.tasks.filter((item) => item.id !== task.id).slice(0, 15);
-    next.tasks.push(completed);
+    next.tasks.push(updated);
     const visibleGroups = new Set(next.tasks.map((item) => item.categoryId));
     next.categories = next.categories
       ?.filter((category) => visibleGroups.has(category.id))
@@ -182,11 +229,17 @@ export class TodoMateApiAdapter implements TaskAdapter {
       });
       if (!response.ok)
         throw new PocketError(
-          response.status === 401 ? "todomate_authentication" : "todomate_unavailable",
-          response.status === 401
-            ? "TodoMate did not accept the backend token."
-            : "Cannot reach TodoMate. Your current tasks are safe.",
-          502,
+          response.status === 409
+            ? "task_conflict"
+            : response.status === 401
+              ? "todomate_authentication"
+              : "todomate_unavailable",
+          response.status === 409
+            ? "Task changed or action unavailable. Refresh and try again."
+            : response.status === 401
+              ? "TodoMate did not accept the backend token."
+              : "Cannot reach TodoMate. Your current tasks are safe.",
+          response.status === 409 ? 409 : 502,
         );
       if (Number(response.headers.get("Content-Length")) > 2000000) throw invalidResponse();
       const reader = response.body?.getReader();
@@ -266,7 +319,7 @@ function parseTask(value: unknown): ApiTask {
     )
   )
     throw invalidResponse();
-  return value as unknown as ApiTask;
+  return { ...value, ...timingFields(value) } as unknown as ApiTask;
 }
 function toFocusTask(task: ApiTask, goals: Map<string, ApiGoal>): FocusTask {
   const label = (goals.get(task.goalId ?? "")?.category.title ?? "").toLowerCase();
@@ -283,6 +336,7 @@ function toFocusTask(task: ApiTask, goals: Map<string, ApiGoal>): FocusTask {
     memo: fit(task.memo ?? "", 1197),
     dueAt: task.dueAt ? new Date(task.dueAt).toISOString() : null,
     completed: task.completed,
+    ...timingFields(task),
   };
 }
 
@@ -296,4 +350,25 @@ function visibleCategories(goals: Map<string, ApiGoal>, tasks: FocusTask[]): Tas
     if (!known.has(id)) categories.push({ id, title: "Uncategorized", color: "#8f8f98" });
   }
   return categories;
+}
+
+function timingFields(task: {
+  timer?: unknown;
+  spentTimeSeconds?: unknown;
+}): Pick<FocusTask, "timer" | "spentTimeSeconds"> {
+  // TodoMate retains uncapped accumulated intervals until Stop. The pocket only
+  // displays up to its native 20-hour limit; actions are still computed upstream.
+  const bounded = (value: unknown) =>
+    typeof value === "number" && Number.isInteger(value) && value >= 0
+      ? Math.min(72000, value)
+      : value;
+  const timer = isObject(task.timer)
+    ? { ...task.timer, elapsedSeconds: bounded(task.timer.elapsedSeconds) }
+    : task.timer;
+  return {
+    ...(timer !== undefined ? { timer: parseTaskTimer(timer) } : {}),
+    ...(task.spentTimeSeconds !== undefined
+      ? { spentTimeSeconds: parseSpentSeconds(bounded(task.spentTimeSeconds)) }
+      : {}),
+  };
 }

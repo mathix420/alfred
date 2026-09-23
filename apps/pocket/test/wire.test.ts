@@ -211,6 +211,123 @@ contract("Bun ↔ ESP32 C wire contract (requires cc and official cJSON source)"
     });
   });
 
+  it("round-trips native reopen/timer encoders and actual Bun acknowledgements", async () => {
+    const local = await createPocketServer(
+      { ...loadPocketConfig({}), port: 0, dataFile: null },
+      { poll: false },
+    );
+    const socket = new WebSocket(`ws://127.0.0.1:${local.server.port}/ws`);
+    const frames: Record<string, unknown>[] = [];
+    socket.onmessage = (event) => {
+      if (typeof event.data === "string") frames.push(JSON.parse(event.data));
+    };
+    await new Promise<void>((resolve, reject) => {
+      socket.onopen = () => resolve();
+      socket.onerror = () => reject(new Error("fixture socket"));
+    });
+    const wait = async () => {
+      const end = Date.now() + 2000;
+      while (!frames.some((frame) => frame.type === "focus")) {
+        if (Date.now() > end) throw new Error("fixture timed out");
+        await Bun.sleep(5);
+      }
+    };
+    try {
+      socket.send(JSON.stringify({ type: "hello", protocol: 2, deviceId: "timer-contract" }));
+      await wait();
+      for (const action of ["reopen", "start", "pause", "stop"] as const) {
+        const encoder = Bun.spawn([binary, action], { stdout: "pipe", stderr: "pipe" });
+        const output = JSON.parse(await new Response(encoder.stdout).text());
+        expect(await encoder.exited).toBe(0);
+        expect(output).toEqual({
+          type: action === "reopen" ? "reopen_task" : "task_timer",
+          id: "contract-task",
+          requestId: "contract-request",
+          ...(action === "reopen" ? {} : { action }),
+        });
+        frames.length = 0;
+        socket.send(
+          JSON.stringify({ ...output, id: "eat-fruit", requestId: `contract-${action}` }),
+        );
+        await wait();
+        expect(await parse(frames[0])).toEqual({
+          result: "ok",
+          type: action === "reopen" ? "task_reopened" : "task_timer_updated",
+          id: "eat-fruit",
+          requestId: `contract-${action}`,
+          ...(action === "reopen" ? {} : { action }),
+        });
+        const source = (
+          frames[1]!.snapshot as {
+            tasks: {
+              id: string;
+              timer?: { startedAt: string | null; elapsedSeconds: number } | null;
+              spentTimeSeconds?: number;
+            }[];
+          }
+        ).tasks.find((task) => task.id === "eat-fruit")!;
+        const decoded = await parse(frames[1]);
+        const task = (decoded.tasks as Record<string, unknown>[]).find(
+          (task) => task.id === "eat-fruit",
+        )!;
+        if (source.timer)
+          expect(task.timer).toEqual({
+            startedAtMs: source.timer.startedAt ? Date.parse(source.timer.startedAt) : 0,
+            elapsedSeconds: source.timer.elapsedSeconds,
+          });
+        if (action === "stop") {
+          expect(task.completed).toBe(true);
+          expect(task.spentTimeSeconds).toBeNumber();
+          expect(task.timer).toBeUndefined();
+        }
+      }
+    } finally {
+      socket.close();
+      await local.stop();
+    }
+  });
+
+  it("decodes timer UTC epochs including leap years and rejects invalid/beyond-limit metadata", async () => {
+    const initial = demoTasks();
+    const frame = (timer: unknown) => ({
+      type: "focus",
+      snapshot: {
+        ...initial,
+        tasks: [{ ...initial.tasks[0], timer }],
+        revision: 1,
+        mode: "live",
+        connection: "online",
+      },
+    });
+    for (const startedAt of [
+      "1970-01-01T00:00:00.001Z",
+      "2000-02-29T23:59:59.999Z",
+      "2026-09-23T14:12:34.567Z",
+      "2100-03-01T00:00:00.000Z",
+    ]) {
+      const parsed = await parse(frame({ startedAt, elapsedSeconds: 72000 }));
+      expect(parsed.result).toBe("ok");
+      expect((parsed.tasks as { timer: unknown }[])[0]?.timer).toEqual({
+        startedAtMs: Date.parse(startedAt),
+        elapsedSeconds: 72000,
+      });
+    }
+    for (const timer of [
+      { startedAt: "2026-02-29T00:00:00.000Z", elapsedSeconds: 0 },
+      { startedAt: "2026-09-23T25:00:00.000Z", elapsedSeconds: 0 },
+      { startedAt: "bad", elapsedSeconds: 0 },
+      { startedAt: null, elapsedSeconds: -1 },
+      { startedAt: null, elapsedSeconds: 72001 },
+      { startedAt: null, elapsedSeconds: 0.5 },
+      { elapsedSeconds: 0 },
+    ])
+      expect((await parse(frame(timer))).result).toBe("bad_field");
+    expect(
+      (await parse({ type: "task_timer_updated", id: "t", requestId: "r", action: "erase" }))
+        .result,
+    ).toBe("bad_field");
+  });
+
   it("preserves TodoMate list identity, order, Unicode labels and colors in C", async () => {
     const categories = [
       { id: "health-list", title: "santé", color: "#f55cbb" },

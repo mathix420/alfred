@@ -371,6 +371,14 @@ section {
 .celebrating .checkmark {
   animation: check-draw 0.28s 0.09s ease forwards;
 }
+.completed-task .check-flower {
+  color: var(--category-color);
+}
+.completed-task .checkmark {
+  opacity: 1;
+  stroke-dashoffset: 0;
+  transform: none;
+}
 .pop-ring {
   position: absolute;
   inset: -2px;
@@ -990,4 +998,78 @@ section {
   opacity: 1;
   stroke-dashoffset: 0;
   transform: none;
+}
+
+.focus-timer {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--secondary);
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+}
+.focus-timer svg {
+  width: 16px;
+  height: 16px;
+}
+.focus-timer.running {
+  color: var(--category-color);
+}
+.timer-handle {
+  position: absolute;
+  right: 0;
+  top: 35%;
+  width: 14px;
+  height: 30%;
+  border: 0;
+  background: transparent;
+}
+.timer-handle::after {
+  content: "";
+  position: absolute;
+  right: 4px;
+  top: 40%;
+  height: 25%;
+  width: 3px;
+  border-radius: 2px;
+  background: #ffffff35;
+}
+.timer-dock {
+  position: absolute;
+  z-index: 4;
+  top: 50%;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px;
+  border: 1px solid #ffffff20;
+  border-right: 0;
+  border-radius: 20px 0 0 20px;
+  background: #27272be1;
+  transform: translate(100%, -50%);
+  transition: transform 0.18s ease;
+}
+.timer-dock.open {
+  transform: translate(0, -50%);
+}
+.timer-dock button {
+  width: 44px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 12px;
+  color: #f4f4f5;
+  background: transparent;
+}
+.timer-dock button:hover:not(:disabled) {
+  background: #ffffff10;
+}
+.timer-dock button:disabled {
+  opacity: 0.25;
+}
+.timer-dock svg {
+  width: 24px;
+  height: 24px;
 }

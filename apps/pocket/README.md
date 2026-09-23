@@ -37,6 +37,18 @@ refreshes, reordered tasks, reconnects, and restarts until you complete it,
 choose another task, or TodoMate removes it. The device and browser remember
 their own selection locally; the server's suggested task resumes afterward.
 
+Select a checked task in Today to inspect it in Focus; tap its checked flower to
+reopen it. The flower changes only after TodoMate confirms the update, and the
+reopened task becomes your selected focus.
+
+On Focus, swipe left from the right edge to open the translucent timer dock.
+Its three icons **Start/resume**, **Pause**, and **Stop** control the task's native
+TodoMate timer. Swipe right to close it. Elapsed time appears on Focus while a
+timer is enabled and stays fixed when paused. **Stop saves elapsed time and
+completes the task**, matching TodoMate. Reopen a completed task before starting
+its timer again. These actions need current Alfred and `todomate-mcp` containers;
+the Docker environment variables stay the same.
+
 ## Add Alfred to an existing Docker stack
 
 The published image is `ghcr.io/mathix420/alfred:latest` (AMD64 and ARM64).

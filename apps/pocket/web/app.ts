@@ -12,7 +12,10 @@ interface Task {
   memo: string;
   dueAt: string | null;
   completed: boolean;
+  timer?: { startedAt: string | null; elapsedSeconds: number } | null;
+  spentTimeSeconds?: number | null;
 }
+type TimerAction = "start" | "pause" | "stop";
 interface Snapshot {
   tasks: Task[];
   categories?: TaskCategory[];
@@ -28,6 +31,9 @@ const flowerPath =
   "M2 32a30 30 0 1 0 60 0 30 30 0 1 0-60 0m36 0a30 30 0 1 0 60 0 30 30 0 1 0-60 0m-36 36a30 30 0 1 0 60 0 30 30 0 1 0-60 0m36 0a30 30 0 1 0 60 0 30 30 0 1 0-60 0z";
 const sparklePath = "M50 0c6 34 16 44 50 50-34 6-44 16-50 50-6-34-16-44-50-50 34-6 44-16 50-50z";
 const icons: Record<string, string> = {
+  start: '<path d="m8 4 12 8-12 8Z" fill="currentColor" stroke="none"/>',
+  pause: '<path d="M8 5v14M16 5v14" stroke-width="4"/>',
+  stop: '<rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor" stroke="none"/>',
   mic: '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   battery: '<rect x="2" y="7" width="17" height="10" rx="2"/><path d="M22 10v4M6 10v4m4-4v4"/>',
@@ -53,6 +59,7 @@ function tick(cls = "checkmark"): string {
 }
 let snapshot: Snapshot | null = null;
 let selectedFocusId: string | null = null;
+let selectedFocusCompleted = false;
 let view: View = "focus";
 let socket: WebSocket | null = null;
 let online = false;
@@ -63,6 +70,15 @@ let toastTimer: ReturnType<typeof setTimeout> | undefined;
 let completion: { task: Task; requestId: string; phase: "waiting" | "celebrating" } | null = null;
 let completionTimer: ReturnType<typeof setTimeout> | undefined;
 let completionTimeout: ReturnType<typeof setTimeout> | undefined;
+let timerDockOpen = false;
+let timerChange: {
+  task: Task;
+  requestId: string;
+  action: TimerAction;
+  acknowledged: boolean;
+  snapshotReceived: boolean;
+} | null = null;
+let timerTimeout: ReturnType<typeof setTimeout> | undefined;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let reconnectDelay = 800;
 let voiceHeld = false;
@@ -123,24 +139,31 @@ function getBrowserId(): string {
 }
 function currentTask(): Task | undefined {
   return (
-    snapshot?.tasks.find((task) => task.id === selectedFocusId && !task.completed) ??
-    snapshot?.tasks.find((task) => task.id === snapshot?.focusId && !task.completed)
+    snapshot?.tasks.find(
+      (task) => task.id === selectedFocusId && (!task.completed || selectedFocusCompleted),
+    ) ?? snapshot?.tasks.find((task) => task.id === snapshot?.focusId && !task.completed)
   );
 }
 function readSelectedFocus(mode: Snapshot["mode"]): string | null {
   try {
-    return localStorage.getItem(`alfred-selected-focus-${mode}`);
+    const key = `alfred-selected-focus-${mode}`;
+    selectedFocusCompleted = localStorage.getItem(`${key}-completed`) === "true";
+    return localStorage.getItem(key);
   } catch {
+    selectedFocusCompleted = false;
     return null;
   }
 }
-function selectFocus(id: string | null): void {
+function selectFocus(id: string | null, completed = false): void {
   selectedFocusId = id;
+  selectedFocusCompleted = Boolean(id && completed);
   try {
     if (!snapshot) return;
     const key = `alfred-selected-focus-${snapshot.mode}`;
     if (id) localStorage.setItem(key, id);
     else localStorage.removeItem(key);
+    if (selectedFocusCompleted) localStorage.setItem(`${key}-completed`, "true");
+    else localStorage.removeItem(`${key}-completed`);
   } catch {
     // Keep the selection for this page when browser storage is unavailable.
   }
@@ -203,8 +226,97 @@ function hint(label = "Hold to talk", action = "voice", mic = true): string {
 function check(): string {
   return `<div class="check-wrap">${flower("check-flower")}${tick()}<span class="pop-ring"></span>${[0, 1, 2, 3, 4, 5].map((i) => flower(`confetti c${i}`, i === 5 ? sparklePath : flowerPath)).join("")}</div>`;
 }
+function timerLabel(task: Task): string {
+  const seconds = Math.min(
+    72000,
+    (task.timer?.elapsedSeconds ?? task.spentTimeSeconds ?? 0) +
+      (task.timer?.startedAt
+        ? Math.max(0, Math.floor((Date.now() - Date.parse(task.timer.startedAt)) / 1000))
+        : 0),
+  );
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return `${hours ? `${hours}:` : ""}${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+}
+function timerControls(task: Task): string {
+  const busy = Boolean(completion || timerChange);
+  const disabled = (action: TimerAction) =>
+    busy ||
+    task.completed ||
+    !online ||
+    snapshot?.connection === "offline" ||
+    (action === "start"
+      ? Boolean(task.timer?.startedAt)
+      : !task.timer || (action === "pause" && !task.timer.startedAt));
+  return `<button class="timer-handle" data-timer-toggle aria-label="${timerDockOpen ? "Close" : "Open"} timer controls" aria-expanded="${timerDockOpen}"></button><div class="timer-dock ${timerDockOpen ? "open" : ""}" ${timerDockOpen ? "" : "inert"} role="group" aria-label="Task timer">${(["start", "pause", "stop"] as const).map((action) => `<button data-timer="${action}" aria-label="${action === "stop" ? "Stop timer and complete task" : action === "pause" ? "Pause timer" : "Start timer"}" ${disabled(action) ? "disabled" : ""}>${icon(action)}</button>`).join("")}</div>`;
+}
+function confirmTimerChange(): void {
+  const pending = timerChange;
+  if (!pending?.acknowledged || !pending.snapshotReceived) return;
+  const task = snapshot?.tasks.find((task) => task.id === pending.task.id);
+  const confirmed =
+    task &&
+    (pending.action === "start"
+      ? !task.completed && Boolean(task.timer?.startedAt)
+      : pending.action === "pause"
+        ? !task.completed && Boolean(task.timer) && task.timer!.startedAt === null
+        : task.completed && task.timer === null);
+  if (!confirmed) return;
+  clearTimeout(timerTimeout);
+  timerChange = null;
+  if (pending.action === "stop") {
+    if (selectedFocusId === task.id) selectFocus(null);
+    timerDockOpen = false;
+    completion = { task: pending.task, requestId: pending.requestId, phase: "celebrating" };
+    completionTimer = setTimeout(() => {
+      completion = null;
+      render();
+    }, 950);
+  } else selectFocus(task.id);
+  announcement.textContent =
+    pending.action === "stop"
+      ? "Timer saved. Task completed."
+      : pending.action === "start"
+        ? "Timer started."
+        : "Timer paused.";
+  render();
+}
+function changeTimer(action: TimerAction): void {
+  const task = currentTask();
+  if (!task || task.completed || timerChange || completion || view !== "focus") return;
+  if (!online || snapshot?.connection === "offline") {
+    notice("You're offline. Reconnect to save the timer.");
+    return;
+  }
+  if (
+    (action === "start" && task.timer?.startedAt) ||
+    (action !== "start" && !task.timer) ||
+    (action === "pause" && !task.timer?.startedAt)
+  )
+    return;
+  const requestId = crypto.randomUUID();
+  timerChange = {
+    task: structuredClone(task),
+    requestId,
+    action,
+    acknowledged: false,
+    snapshotReceived: false,
+  };
+  if (!send({ type: "task_timer", id: task.id, requestId, action })) {
+    timerChange = null;
+    notice("Reconnecting. Please try again.");
+    return;
+  }
+  render();
+  timerTimeout = setTimeout(() => {
+    if (timerChange?.requestId !== requestId) return;
+    timerChange = null;
+    notice("Still waiting for the timer change. Refreshing your task…");
+    void refresh();
+  }, requestTimeoutMs);
+}
 function focusView(): string {
-  const task = completion?.task ?? currentTask();
+  const task = completion?.task ?? timerChange?.task ?? currentTask();
   if (
     !snapshot ||
     ((!online || snapshot.connection === "offline") && snapshot.mode !== "demo" && !task)
@@ -215,7 +327,7 @@ function focusView(): string {
   const due = dueLabel(task);
   const phase = completion?.phase ?? "";
   const group = taskCategory(task);
-  return `<div class="page ${phase}" data-view="focus" ${categoryAttributes(group)}>${status()}<button class="focus-body" data-complete="${escape(task.id)}" aria-label="Complete task: ${escape(task.title)}" ${completion ? "disabled" : ""}><span class="category-row">${category(group)}${due ? `<span class="due">${icon("clock")}${escape(due)}</span>` : ""}</span>${check()}<span class="task-title ${task.title.length > 65 ? "long" : ""}">${escape(task.title)}</span></button>${phase === "celebrating" ? '<div class="hint success">Nice.</div>' : phase === "waiting" ? '<div class="hint">Saving…</div>' : hint()}<button class="grabber" data-today aria-label="Open today"></button></div>`;
+  return `<div class="page ${phase} ${task.completed ? "completed-task" : ""}" data-view="focus" ${categoryAttributes(group)}>${status()}<button class="focus-body" data-complete="${escape(task.id)}" aria-pressed="${task.completed}" aria-label="${task.completed ? "Reopen" : "Complete"} task: ${escape(task.title)}" ${completion || timerChange ? "disabled" : ""}><span class="category-row">${category(group)}${due ? `<span class="due">${icon("clock")}${escape(due)}</span>` : ""}</span>${check()}${task.timer ? `<span class="focus-timer ${task.timer.startedAt ? "running" : "paused"}" data-elapsed aria-label="${task.timer.startedAt ? "Running" : "Paused"} timer">${icon(task.timer.startedAt ? "clock" : "pause")}${timerLabel(task)}</span>` : ""}<span class="task-title ${task.title.length > 65 ? "long" : ""}">${escape(task.title)}</span></button>${phase === "celebrating" ? '<div class="hint success">Nice.</div>' : phase === "waiting" || timerChange ? '<div class="hint">Saving…</div>' : hint()}${timerControls(task)}<button class="grabber" data-today aria-label="Open today"></button></div>`;
 }
 function todayView(): string {
   if (!snapshot) return offlineView();
@@ -306,12 +418,15 @@ function adopt(next: Snapshot): void {
   acceptNextSnapshot = false;
   if (snapshot?.mode !== next.mode) selectedFocusId = readSelectedFocus(next.mode);
   snapshot = next;
-  if (
-    selectedFocusId &&
-    (next.connection === "online" || next.mode === "demo") &&
-    !next.tasks.some((task) => task.id === selectedFocusId && !task.completed)
-  )
-    selectFocus(null);
+  if (selectedFocusId && (next.connection === "online" || next.mode === "demo")) {
+    const selected = next.tasks.find((task) => task.id === selectedFocusId);
+    if (!selected || (selected.completed && !selectedFocusCompleted)) selectFocus(null);
+    else if (!selected.completed && selectedFocusCompleted) selectFocus(selected.id);
+  }
+  if (timerChange) {
+    timerChange.snapshotReceived = true;
+    confirmTimerChange();
+  }
   if (!completion) render();
 }
 async function refresh(): Promise<void> {
@@ -354,7 +469,13 @@ function connect(): void {
         adopt(message.snapshot as Snapshot);
         break;
       case "task_completed":
-        if (!completion || completion.requestId !== message.requestId) break;
+        if (
+          !completion ||
+          completion.task.completed ||
+          completion.requestId !== message.requestId ||
+          completion.task.id !== message.id
+        )
+          break;
         if (selectedFocusId === completion.task.id) selectFocus(null);
         clearTimeout(completionTimeout);
         completion.phase = "celebrating";
@@ -366,6 +487,41 @@ function connect(): void {
           render();
           void refresh();
         }, 950);
+        break;
+      case "task_reopened": {
+        if (
+          !completion ||
+          !completion.task.completed ||
+          completion.requestId !== message.requestId ||
+          completion.task.id !== message.id
+        )
+          break;
+        const task = completion.task;
+        clearTimeout(completionTimeout);
+        // Only the acknowledged write can untick the flower. Keep the inspection
+        // marker until its next authoritative snapshot confirms pending state.
+        if (snapshot)
+          snapshot.tasks = snapshot.tasks.map((item) =>
+            item.id === task.id ? { ...item, completed: false } : item,
+          );
+        selectFocus(task.id, true);
+        completion = null;
+        view = "focus";
+        announcement.textContent = `Reopened: ${task.title}`;
+        render();
+        void refresh();
+        break;
+      }
+      case "task_timer_updated":
+        if (
+          timerChange &&
+          timerChange.requestId === message.requestId &&
+          timerChange.task.id === message.id &&
+          timerChange.action === message.action
+        ) {
+          timerChange.acknowledged = true;
+          confirmTimerChange();
+        }
         break;
       case "state":
         if (message.state === "idle") {
@@ -392,10 +548,16 @@ function connect(): void {
           requestToken();
           break;
         }
-        if (!message.requestId || message.requestId === completion?.requestId) {
+        if (
+          !message.requestId ||
+          message.requestId === completion?.requestId ||
+          message.requestId === timerChange?.requestId
+        ) {
           clearTimeout(completionTimeout);
           clearTimeout(completionTimer);
           completion = null;
+          clearTimeout(timerTimeout);
+          timerChange = null;
           stopCapture();
           voiceHeld = false;
           view = "focus";
@@ -411,6 +573,8 @@ function connect(): void {
   ws.onclose = () => {
     if (socket !== ws) return;
     online = false;
+    clearTimeout(timerTimeout);
+    timerChange = null;
     socket = null;
     stopCapture();
     voiceHeld = false;
@@ -426,7 +590,7 @@ function connect(): void {
   ws.onerror = () => ws.close();
 }
 function complete(id?: string): void {
-  if (completion || view !== "focus") return;
+  if (completion || timerChange || view !== "focus") return;
   const task = currentTask();
   if (!task || (id && id !== task.id)) return;
   if (!online || snapshot?.connection === "offline") {
@@ -436,7 +600,7 @@ function complete(id?: string): void {
   }
   const requestId = crypto.randomUUID();
   completion = { task: { ...task }, requestId, phase: "waiting" };
-  if (!send({ type: "complete_task", id: task.id, requestId })) {
+  if (!send({ type: task.completed ? "reopen_task" : "complete_task", id: task.id, requestId })) {
     completion = null;
     notice("Reconnecting. Please try again.");
     return;
@@ -450,7 +614,8 @@ function complete(id?: string): void {
   }, requestTimeoutMs);
 }
 function beginMotion(next: View, direction: number, taskId?: string): PageMotion | null {
-  if (motion || completion || voiceHeld || view === next) return null;
+  if (motion || completion || timerChange || voiceHeld || view === next) return null;
+  timerDockOpen = false;
   if (next === "memo") memoId = taskId ?? currentTask()?.id ?? null;
   const outgoing = screen.querySelector<HTMLElement>(".page");
   if (!outgoing) return null;
@@ -547,7 +712,7 @@ function stopCapture(): void {
   worklet = null;
 }
 async function startVoice(): Promise<void> {
-  if (voiceHeld || completion) return;
+  if (voiceHeld || completion || timerChange) return;
   if (!online) {
     notice("Connect to Alfred to talk.");
     return;
@@ -649,6 +814,7 @@ let gesture: {
   scroll: HTMLElement | null;
   voice: boolean;
   pointerId: number;
+  horizontal: boolean;
 } | null = null;
 let suppressClick = false;
 screen.addEventListener("pointerdown", (event) => {
@@ -665,6 +831,7 @@ screen.addEventListener("pointerdown", (event) => {
     scroll: target.closest<HTMLElement>("[data-scroll]"),
     voice,
     pointerId: event.pointerId,
+    horizontal: false,
   };
   if (voice) {
     event.preventDefault();
@@ -676,9 +843,24 @@ screen.addEventListener("pointerdown", (event) => {
 screen.addEventListener("pointermove", (event) => {
   const start = gesture;
   // Native browser scrolling owns content gestures; header drags own navigation.
-  if (!start || start.voice || start.scroll || completion) return;
+  if (!start || start.voice || start.scroll || completion || timerChange) return;
   const dx = event.clientX - start.x;
   const dy = event.clientY - start.y;
+  if (
+    !motion &&
+    view === "focus" &&
+    currentTask() &&
+    Math.abs(dx) > 10 &&
+    Math.abs(dx) > Math.abs(dy) * 1.2 &&
+    (timerDockOpen || start.x > screen.getBoundingClientRect().right - 80)
+  ) {
+    start.horizontal = true;
+    screen.setPointerCapture(event.pointerId);
+  }
+  if (start.horizontal) {
+    event.preventDefault();
+    return;
+  }
   const elapsed = event.timeStamp - start.lastTime;
   if (elapsed > 0) start.velocity = (event.clientY - start.lastY) / elapsed;
   start.lastY = event.clientY;
@@ -706,6 +888,12 @@ screen.addEventListener("pointerup", (event) => {
   gesture = null;
   screen.querySelector(".page")?.classList.remove("pressed");
   if (!start) return;
+  if (start.horizontal) {
+    suppressNextClick();
+    if (Math.abs(event.clientX - start.x) > 30) timerDockOpen = event.clientX < start.x;
+    render();
+    return;
+  }
   if (start.voice) {
     suppressNextClick();
     finishVoice();
@@ -737,7 +925,16 @@ function suppressNextClick(): void {
 screen.addEventListener("click", (event) => {
   if (suppressClick || motion) return;
   const target = event.target as HTMLElement;
-  if (target.closest("[data-back]")) navigate("focus");
+  const timerAction = target.closest<HTMLElement>("[data-timer]")?.dataset.timer;
+  if (timerAction === "start" || timerAction === "pause" || timerAction === "stop")
+    changeTimer(timerAction);
+  else if (target.closest("[data-timer-toggle]")) {
+    timerDockOpen = !timerDockOpen;
+    render();
+  } else if (view === "focus" && timerDockOpen) {
+    timerDockOpen = false;
+    render();
+  } else if (target.closest("[data-back]")) navigate("focus");
   else if (target.closest("[data-today]")) navigate("today");
   else if (target.closest("[data-cancel]")) cancel();
   else if (target.closest("[data-retry]")) {
@@ -749,11 +946,10 @@ screen.addEventListener("click", (event) => {
   else {
     const taskId = target.closest<HTMLElement>("[data-task]")?.dataset.task;
     const task = snapshot?.tasks.find((item) => item.id === taskId);
-    if (task && !task.completed) {
-      selectFocus(task.id);
+    if (task) {
+      selectFocus(task.id, task.completed);
       navigate("focus");
-    } else if (task) navigate("memo", task.id);
-    else if (view === "focus" && target.closest("[data-complete]")) complete();
+    } else if (view === "focus" && target.closest("[data-complete]")) complete();
   }
 });
 let wheelLocked = false;
@@ -793,7 +989,15 @@ document.querySelector("#action-button")!.addEventListener("click", () => {
 });
 document.addEventListener("keydown", (event) => {
   if (accessDialog.open || event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
-  if (event.code === "Space") {
+  if (
+    view === "focus" &&
+    currentTask() &&
+    (event.key === "ArrowLeft" || event.key === "ArrowRight")
+  ) {
+    event.preventDefault();
+    timerDockOpen = event.key === "ArrowLeft";
+    render();
+  } else if (event.code === "Space") {
     event.preventDefault();
     void startVoice();
   } else if (event.key === "Escape") {
@@ -829,6 +1033,10 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 setInterval(() => {
+  const elapsed = screen.querySelector("[data-elapsed]");
+  const task = timerChange?.task ?? currentTask();
+  if (elapsed && task?.timer)
+    elapsed.innerHTML = `${icon(task.timer.startedAt ? "clock" : "pause")}${timerLabel(task)}`;
   const time = screen.querySelector(".clock-time");
   if (time)
     time.textContent = new Date().toLocaleTimeString([], {

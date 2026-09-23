@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 typedef int esp_err_t;
 #define ESP_OK 0
 #define ESP_FAIL -1
@@ -22,6 +23,19 @@ typedef int esp_err_t;
       return _err;                                                             \
   } while (0)
 static uint32_t fake_ms;
+static time_t fake_wall_epoch = 1700000000;
+static inline time_t host_time(time_t *output) {
+  time_t now = fake_wall_epoch + fake_ms / 1000;
+  if (output)
+    *output = now;
+  return now;
+}
+#define time host_time
+static inline uint32_t esp_random(void) {
+  static uint32_t sequence = 0x12345678;
+  sequence = sequence * 1664525u + 1013904223u;
+  return sequence;
+}
 static uint16_t pointer_x, pointer_y;
 static bool pointer_down;
 static inline int64_t esp_timer_get_time(void) {
@@ -99,6 +113,7 @@ typedef int nvs_handle_t;
 #define ESP_ERR_NVS_NOT_FOUND -4
 #define ESP_ERR_NVS_INVALID_LENGTH -5
 static char saved_focus[64], staged_focus[64];
+static uint8_t saved_focus_done, staged_focus_done;
 static unsigned nvs_commits;
 static bool nvs_pending;
 static inline int nvs_open(const char *name, int mode, nvs_handle_t *handle) {
@@ -106,6 +121,7 @@ static inline int nvs_open(const char *name, int mode, nvs_handle_t *handle) {
   *handle = mode + 1;
   if (mode == NVS_READWRITE) {
     strcpy(staged_focus, saved_focus);
+    staged_focus_done = saved_focus_done;
     nvs_pending = false;
   }
   return ESP_OK;
@@ -148,6 +164,20 @@ static inline int nvs_get_u32(nvs_handle_t h, const char *k, uint32_t *v) {
   (void)v;
   return ESP_ERR_NVS_NOT_FOUND;
 }
+static inline int nvs_get_u8(nvs_handle_t h, const char *key, uint8_t *value) {
+  (void)h;
+  assert(!strcmp(key, "focus_done"));
+  if (!saved_focus[0])
+    return ESP_ERR_NVS_NOT_FOUND;
+  *value = saved_focus_done;
+  return ESP_OK;
+}
+static inline int nvs_set_u8(nvs_handle_t h, const char *key, uint8_t value) {
+  assert(h == NVS_READWRITE + 1 && !strcmp(key, "focus_done"));
+  staged_focus_done = value;
+  nvs_pending = true;
+  return ESP_OK;
+}
 static inline int nvs_set_u32(nvs_handle_t h, const char *k, uint32_t v) {
   (void)h;
   (void)k;
@@ -158,6 +188,7 @@ static inline int nvs_commit(nvs_handle_t handle) {
   assert(handle == NVS_READWRITE + 1);
   if (nvs_pending) {
     strcpy(saved_focus, staged_focus);
+    saved_focus_done = staged_focus_done;
     nvs_pending = false;
     nvs_commits++;
   }

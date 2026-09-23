@@ -8,6 +8,7 @@
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -27,10 +28,16 @@ static const char *TAG = "pocket_ui";
 #define PAGE_SLIDE_MS 220
 #define PAGE_HEIGHT 448
 #define HEADER_END_Y 92
+#define TIMER_DOCK_X 296
+#define TIMER_DOCK_Y 116
+#define TIMER_DOCK_WIDTH 64
+#define TIMER_DOCK_HEIGHT 212
 #if ALFRED_ENABLE_DEMO
 #define FOCUS_NVS_KEY "demo_focus"
+#define FOCUS_DONE_NVS_KEY "demo_focus_done"
 #else
 #define FOCUS_NVS_KEY "focus_task"
+#define FOCUS_DONE_NVS_KEY "focus_done"
 #endif
 
 typedef enum {
@@ -47,9 +54,12 @@ typedef struct {
       *grabber;
   lv_obj_t *hero, *title, *wave[5], *dots[3], *particles[9];
   lv_obj_t *outgoing, *scroll, *memo_fade;
+  lv_obj_t *elapsed, *timer_dock, *timer_buttons[3];
   alfred_focus_snapshot_t *snapshot, *deferred;
   bool has_deferred, connected, configured, demo, touch_down, touch_hold;
-  bool pending, acknowledged, completing, rebuild, focus_received;
+  bool pending, acknowledged, completing, reopening, rebuild, focus_received;
+  bool timer_pending, dock_open;
+  alfred_task_timer_action_t timer_action;
   bool connection_failed, server_demo;
   bool gesture_moved, transition, ignore_touch, press_at_top, press_at_bottom;
   page_t page, rendered_page;
@@ -57,6 +67,7 @@ typedef struct {
   int battery_pct;
   bool charging;
   char selected_id[ALFRED_TASK_ID_MAX];
+  bool selected_completed;
   char pending_id[ALFRED_TASK_ID_MAX], request_id[ALFRED_REQUEST_ID_MAX];
   char note[128];
   uint32_t request_counter, pending_since, complete_since, touch_since,
@@ -94,6 +105,13 @@ static void copy(char *dst, size_t cap, const char *src) {
 static void emit(ui_action_t action, const char *id, const char *request) {
   if (s.action)
     s.action(action, id, request, s.action_user);
+}
+static void new_request_id(void) {
+  // Uptime and counters restart at boot; a nonce prevents an old durable server
+  // deduplication entry from acknowledging a different action after a restart.
+  snprintf(s.request_id, sizeof(s.request_id), "device-%08lx-%08lx-%lu",
+           (unsigned long)esp_random(), (unsigned long)ticks(),
+           (unsigned long)++s.request_counter);
 }
 static lv_color_t color(uint32_t hex) { return lv_color_hex(hex); }
 static uint32_t category_color(alfred_task_category_t c) {
@@ -136,14 +154,21 @@ static void load_selection(void) {
   size_t length = sizeof(s.selected_id);
   if (nvs_get_str(h, FOCUS_NVS_KEY, s.selected_id, &length) != ESP_OK)
     s.selected_id[0] = 0;
+  uint8_t completed = 0;
+  if (s.selected_id[0] &&
+      nvs_get_u8(h, FOCUS_DONE_NVS_KEY, &completed) == ESP_OK)
+    s.selected_completed = completed == 1;
   nvs_close(h);
 }
-static void set_selection(const char *id) {
+static void set_selection(const char *id, bool completed) {
   if (!id)
     id = "";
-  if (!strcmp(s.selected_id, id))
+  completed = id[0] && completed;
+  if (!strcmp(s.selected_id, id) && s.selected_completed == completed)
     return;
-  copy(s.selected_id, sizeof(s.selected_id), id);
+  if (strcmp(s.selected_id, id))
+    copy(s.selected_id, sizeof(s.selected_id), id);
+  s.selected_completed = completed;
   nvs_handle_t h;
   esp_err_t err = nvs_open("pocket", NVS_READWRITE, &h);
   if (err == ESP_OK) {
@@ -151,6 +176,8 @@ static void set_selection(const char *id) {
                 : nvs_erase_key(h, FOCUS_NVS_KEY);
     if (err == ESP_ERR_NVS_NOT_FOUND)
       err = ESP_OK;
+    if (err == ESP_OK)
+      err = nvs_set_u8(h, FOCUS_DONE_NVS_KEY, completed ? 1 : 0);
     if (err == ESP_OK)
       err = nvs_commit(h);
     nvs_close(h);
@@ -163,12 +190,21 @@ static void reconcile_selection(void) {
   if (!s.selected_id[0] || !s.snapshot->online)
     return;
   int idx = find_task(s.selected_id);
-  if (idx < 0 || s.snapshot->tasks[idx].completed)
-    set_selection(NULL);
+  if (idx < 0 ||
+      (s.snapshot->tasks[idx].completed && !s.selected_completed))
+    set_selection(NULL, false);
+  else if (!s.snapshot->tasks[idx].completed && s.selected_completed)
+    set_selection(s.selected_id, false);
 }
 static int active_index(void) {
+  if (s.completing) {
+    int completing = find_task(s.pending_id);
+    if (completing >= 0)
+      return completing;
+  }
   int selected = find_task(s.selected_id);
-  if (selected >= 0 && !s.snapshot->tasks[selected].completed)
+  if (selected >= 0 &&
+      (!s.snapshot->tasks[selected].completed || s.selected_completed))
     return selected;
   int idx = find_task(s.snapshot->focus_id);
   if (idx >= 0 && !s.snapshot->tasks[idx].completed)
@@ -436,6 +472,8 @@ static void update_status(void) {
 }
 
 static void show_page(page_t page) {
+  if (page != PAGE_FOCUS)
+    s.dock_open = false;
   s.page = page;
   s.rebuild = true;
 }
@@ -534,10 +572,11 @@ static void begin_complete(void) {
   }
   s.note[0] = 0;
   copy(s.pending_id, sizeof(s.pending_id), task->id);
-  snprintf(s.request_id, sizeof(s.request_id), "device-%08lx-%lu",
-           (unsigned long)ticks(), (unsigned long)++s.request_counter);
+  new_request_id();
   s.pending = true;
-  s.completing = true;
+  s.timer_pending = false;
+  s.reopening = task->completed;
+  s.completing = !s.reopening;
   s.pending_since = ticks();
   s.complete_since = ticks();
   s.acknowledged = false;
@@ -545,12 +584,14 @@ static void begin_complete(void) {
   s.acknowledged = s.demo && !s.connected;
 #endif
   if (!s.acknowledged)
-    emit(UI_COMPLETE, s.pending_id, s.request_id);
+    emit(s.reopening ? UI_REOPEN : UI_COMPLETE, s.pending_id, s.request_id);
   s.rebuild = true;
 }
 static void cancel_pending(const char *note) {
   s.pending = false;
   s.completing = false;
+  s.reopening = false;
+  s.timer_pending = false;
   s.acknowledged = false;
   copy(s.note, sizeof(s.note), note);
   s.pending_id[0] = 0;
@@ -571,7 +612,7 @@ static void finish_complete(void) {
   if (idx >= 0)
     s.snapshot->tasks[idx].completed = true;
   if (!strcmp(s.selected_id, s.pending_id))
-    set_selection(NULL);
+    set_selection(NULL, false);
   reconcile_selection();
 #if ALFRED_ENABLE_DEMO
   if (s.demo && !s.connected)
@@ -579,11 +620,181 @@ static void finish_complete(void) {
 #endif
   s.pending = false;
   s.completing = false;
+  s.reopening = false;
   s.acknowledged = false;
   s.pending_id[0] = 0;
   s.request_id[0] = 0;
   s.note[0] = 0;
   show_page(PAGE_FOCUS);
+}
+static void finish_reopen(void) {
+  if (s.has_deferred) {
+    memcpy(s.snapshot, s.deferred, sizeof(*s.snapshot));
+    s.has_deferred = false;
+  }
+  int idx = find_task(s.pending_id);
+  if (idx >= 0) {
+    s.snapshot->tasks[idx].completed = false;
+    set_selection(s.pending_id, false);
+  }
+  reconcile_selection();
+#if ALFRED_ENABLE_DEMO
+  if (s.demo && !s.connected)
+    save_demo();
+#endif
+  s.pending = false;
+  s.reopening = false;
+  s.acknowledged = false;
+  s.pending_id[0] = 0;
+  s.request_id[0] = 0;
+  s.note[0] = 0;
+  show_page(PAGE_FOCUS);
+}
+static uint32_t timer_seconds(const alfred_focus_task_t *task, int64_t now_ms) {
+  int64_t elapsed = task->timer_elapsed_seconds;
+  if (task->timer_started_at_ms > 0 && now_ms > task->timer_started_at_ms)
+    elapsed += (now_ms - task->timer_started_at_ms) / 1000;
+  return elapsed > 72000 ? 72000 : (uint32_t)elapsed;
+}
+static void update_elapsed(void) {
+  alfred_focus_task_t *task = active_task();
+  if (!s.elapsed || !task || !task->has_timer)
+    return;
+  uint32_t seconds = timer_seconds(task, (int64_t)time(NULL) * 1000);
+  char elapsed[24];
+  if (seconds >= 3600)
+    snprintf(elapsed, sizeof(elapsed), "%lu:%02lu:%02lu",
+             (unsigned long)(seconds / 3600),
+             (unsigned long)(seconds / 60 % 60), (unsigned long)(seconds % 60));
+  else
+    snprintf(elapsed, sizeof(elapsed), "%02lu:%02lu",
+             (unsigned long)(seconds / 60), (unsigned long)(seconds % 60));
+  lv_label_set_text(s.elapsed, elapsed);
+}
+static bool timer_action_enabled(const alfred_focus_task_t *task,
+                                  alfred_task_timer_action_t action) {
+  if (!task || task->completed || s.pending || !live_actions_ready())
+    return false;
+  if (action == ALFRED_TIMER_START)
+    return !task->has_timer || task->timer_started_at_ms == 0;
+  if (action == ALFRED_TIMER_PAUSE)
+    return task->has_timer && task->timer_started_at_ms > 0;
+  return action == ALFRED_TIMER_STOP && task->has_timer;
+}
+static void begin_timer(alfred_task_timer_action_t action) {
+  alfred_focus_task_t *task = active_task();
+  if (!timer_action_enabled(task, action))
+    return;
+  copy(s.pending_id, sizeof(s.pending_id), task->id);
+  new_request_id();
+  s.pending = true;
+  s.timer_pending = true;
+  s.timer_action = action;
+  s.completing = false;
+  s.reopening = false;
+  s.acknowledged = false;
+  s.pending_since = ticks();
+  s.note[0] = 0;
+  emit(action == ALFRED_TIMER_START ? UI_TIMER_START
+         : action == ALFRED_TIMER_PAUSE ? UI_TIMER_PAUSE : UI_TIMER_STOP,
+       s.pending_id, s.request_id);
+  s.rebuild = true;
+}
+static void apply_timer_result(void) {
+  if (!s.timer_pending || !s.acknowledged || !s.has_deferred)
+    return;
+  const alfred_focus_task_t *task = NULL;
+  for (size_t i = 0; i < s.deferred->count; ++i)
+    if (!strcmp(s.deferred->tasks[i].id, s.pending_id)) {
+      task = &s.deferred->tasks[i];
+      break;
+    }
+  // An old focus broadcast may precede the ACK. Wait for the state that the
+  // confirmed action promises instead of inventing a local timer result.
+  if (!s.deferred->online || !task)
+    return;
+  bool matches = s.timer_action == ALFRED_TIMER_START
+                     ? !task->completed && task->has_timer &&
+                           task->timer_started_at_ms > 0
+                 : s.timer_action == ALFRED_TIMER_PAUSE
+                     ? !task->completed && task->has_timer &&
+                           task->timer_started_at_ms == 0
+                     : task->completed && !task->has_timer;
+  if (!matches)
+    return;
+  memcpy(s.snapshot, s.deferred, sizeof(*s.snapshot));
+  s.has_deferred = false;
+  s.timer_pending = false;
+  if (s.timer_action == ALFRED_TIMER_STOP) {
+    s.dock_open = false;
+    s.completing = true;
+    s.complete_since = ticks();
+  } else {
+    set_selection(s.pending_id, false);
+    s.pending = false;
+    s.acknowledged = false;
+    s.pending_id[0] = 0;
+    s.request_id[0] = 0;
+  }
+  s.rebuild = true;
+}
+static void timer_icon_draw(lv_event_t *e) {
+  lv_obj_t *button = lv_event_get_target(e);
+  alfred_task_timer_action_t action =
+      (alfred_task_timer_action_t)(uintptr_t)lv_event_get_user_data(e);
+  alfred_focus_task_t *task = active_task();
+  uint32_t hex = timer_action_enabled(task, action) ? POCKET_TEXT : POCKET_DIM;
+  lv_area_t a;
+  lv_obj_get_coords(button, &a);
+  int x = a.x1 + 14, y = a.y1 + 21;
+  lv_layer_t *layer = lv_event_get_layer(e);
+  if (action == ALFRED_TIMER_START) {
+    lv_draw_triangle_dsc_t d;
+    lv_draw_triangle_dsc_init(&d);
+    d.color = color(hex);
+    d.p[0] = (lv_point_precise_t){x + 2, y};
+    d.p[1] = (lv_point_precise_t){x + 2, y + 20};
+    d.p[2] = (lv_point_precise_t){x + 19, y + 10};
+    lv_draw_triangle(layer, &d);
+  } else {
+    lv_draw_rect_dsc_t d;
+    lv_draw_rect_dsc_init(&d);
+    d.bg_color = color(hex);
+    d.radius = 2;
+    lv_area_t shape = {x + 1, y + 1, x + 18, y + 18};
+    if (action == ALFRED_TIMER_PAUSE) {
+      shape.x2 = x + 6;
+      lv_draw_rect(layer, &d, &shape);
+      shape.x1 = x + 13;
+      shape.x2 = x + 18;
+    }
+    lv_draw_rect(layer, &d, &shape);
+  }
+}
+static void timer_clicked(lv_event_t *e) {
+  if (!s.gesture_moved && !s.transition)
+    begin_timer((alfred_task_timer_action_t)(uintptr_t)lv_event_get_user_data(e));
+}
+static void build_timer_dock(void) {
+  s.timer_dock = box(s.body, TIMER_DOCK_X, TIMER_DOCK_Y, TIMER_DOCK_WIDTH,
+                      TIMER_DOCK_HEIGHT);
+  lv_obj_set_style_radius(s.timer_dock, 22, 0);
+  lv_obj_set_style_bg_color(s.timer_dock, color(0x27272B), 0);
+  lv_obj_set_style_bg_opa(s.timer_dock, 225, 0);
+  lv_obj_set_style_border_width(s.timer_dock, 1, 0);
+  lv_obj_set_style_border_color(s.timer_dock, color(0x434348), 0);
+  lv_obj_set_style_border_opa(s.timer_dock, 100, 0);
+  const alfred_task_timer_action_t actions[] = {
+      ALFRED_TIMER_START, ALFRED_TIMER_PAUSE, ALFRED_TIMER_STOP};
+  for (unsigned i = 0; i < 3; ++i) {
+    lv_obj_t *button = box(s.timer_dock, 8, 7 + 66 * i, 48, 64);
+    s.timer_buttons[i] = button;
+    lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(button, timer_icon_draw, LV_EVENT_DRAW_MAIN,
+                         (void *)(uintptr_t)actions[i]);
+    lv_obj_add_event_cb(button, timer_clicked, LV_EVENT_SHORT_CLICKED,
+                         (void *)(uintptr_t)actions[i]);
+  }
 }
 static void build_offline(void);
 static void build_focus(void) {
@@ -618,8 +829,16 @@ static void build_focus(void) {
     }
     s.hero =
         flower(s.body, 32, 146, 120,
-               s.completing ? task_color(task) : POCKET_UNCHECKED,
-               s.completing);
+               s.completing || task->completed ? task_color(task)
+                                               : POCKET_UNCHECKED,
+               s.completing || task->completed);
+    if (task->has_timer && !s.completing) {
+      s.elapsed = label(s.body, 174, 191, 116, "", &inter_23, task_color(task));
+      update_elapsed();
+      label(s.body, 174, 222, 116,
+             task->timer_started_at_ms ? "Focusing" : "Paused", &inter_14,
+             POCKET_SECONDARY);
+    }
     s.title = label(s.body, 24, 297, 320, task->title, &inter_34, POCKET_TEXT);
     lv_obj_set_style_text_letter_space(s.title, -1, 0);
     lv_obj_set_style_text_line_space(s.title, -3, 0);
@@ -639,23 +858,32 @@ static void build_focus(void) {
             flower(s.body, 92, 206, (i % 3) * 3 + 4, colors[i], false);
     }
   }
-  if (s.completing)
+  if (s.timer_pending)
+    set_hint("Saving...", task ? task_color(task) : POCKET_SECONDARY, false);
+  else if (s.reopening)
+    set_hint("Reopening...", task ? task_color(task) : POCKET_SECONDARY, false);
+  else if (s.completing)
     set_hint(s.acknowledged ? "Nice." : "Saving...",
              task ? task_color(task) : POCKET_SECONDARY, false);
   else if (s.note[0]) {
     set_hint(s.note, 0xE8927C, false);
     lv_label_set_long_mode(s.hint, LV_LABEL_LONG_SCROLL_CIRCULAR);
-  } else
+  } else if (task && task->completed)
+    set_hint("Tap to reopen", POCKET_DIM, false);
+  else
     set_hint("Hold to talk", POCKET_DIM, true);
+  if (s.dock_open && task)
+    build_timer_dock();
 }
 static void row_clicked(lv_event_t *e) {
   if (s.gesture_moved || s.transition || s.pending)
     return;
   const char *id = lv_event_get_user_data(e);
   int idx = find_task(id);
-  if (idx < 0 || s.snapshot->tasks[idx].completed)
+  if (idx < 0)
     return;
-  set_selection(id);
+  set_selection(id, s.snapshot->tasks[idx].completed);
+  s.note[0] = 0;
   show_page(PAGE_FOCUS);
 }
 static void row_deleted(lv_event_t *e) {
@@ -701,7 +929,7 @@ static int today_group(lv_obj_t *list, int y,
                         &inter_20, POCKET_TEXT);
     lv_obj_set_height(l, 50);
     lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
-    if (active)
+    if (active && !task->completed)
       label(row, 283, 22, 36, "now", &inter_14, task_color(task));
     // The snapshot may reorder before the next redraw; retain the rendered ID.
     char *id = lv_malloc(strlen(task->id) + 1);
@@ -905,6 +1133,9 @@ static void rebuild(void) {
   s.hint = NULL;
   s.scroll = NULL;
   s.memo_fade = NULL;
+  s.elapsed = NULL;
+  s.timer_dock = NULL;
+  memset(s.timer_buttons, 0, sizeof(s.timer_buttons));
   if (s.page == PAGE_FOCUS)
     build_focus();
   else if (s.page == PAGE_TODAY)
@@ -951,6 +1182,26 @@ static void touch_release_action(int dx, int dy) {
     s.touch_hold = false;
     ui_handle_ptt(false);
     return;
+  }
+  if (s.page == PAGE_FOCUS && abs(dx) >= 40 && abs(dx) > abs(dy)) {
+    if (s.dock_open && dx > 0) {
+      s.dock_open = false;
+      s.rebuild = true;
+    } else if (!s.dock_open && dx < 0 && s.press_x >= 336 &&
+               active_task() && !s.pending) {
+      s.dock_open = true;
+      s.rebuild = true;
+    }
+    return;
+  }
+  if (s.page == PAGE_FOCUS && s.dock_open) {
+    if (!s.gesture_moved &&
+        (s.press_x < TIMER_DOCK_X || s.press_y < TIMER_DOCK_Y ||
+         s.press_y >= TIMER_DOCK_Y + TIMER_DOCK_HEIGHT)) {
+      s.dock_open = false;
+      s.rebuild = true;
+    }
+    return; // Dock gestures never toggle the focused task or change pages.
   }
   if (vertical_swipe(dx, dy)) {
     if (!has_focus_data())
@@ -1031,11 +1282,14 @@ static void ui_tick(lv_timer_t *timer) {
     s.touch_hold = true;
     ui_handle_ptt(true);
   }
-  if (s.pending && !s.acknowledged && now - s.pending_since > ACK_TIMEOUT_MS)
+  if (s.pending && (!s.acknowledged || s.timer_pending) &&
+      now - s.pending_since > ACK_TIMEOUT_MS)
     cancel_pending("Not saved. Tap to try again.");
   if (s.completing && s.acknowledged &&
       now - s.complete_since >= COMPLETE_HOLD_MS)
     finish_complete();
+  if (s.reopening && s.acknowledged)
+    finish_reopen();
   // Matrix has already acknowledged delivery. Return even if its subsequent
   // idle packet is lost while the device disconnects.
   if (s.page == PAGE_SENT && now - s.sent_since >= SENT_HOLD_MS)
@@ -1045,6 +1299,7 @@ static void ui_tick(lv_timer_t *timer) {
     rebuild();
   if (now - s.last_clock > 1000) {
     update_status();
+    update_elapsed();
     s.last_clock = now;
   }
   if (s.completing && s.hero) {
@@ -1249,6 +1504,7 @@ void ui_set_focus(const alfred_focus_snapshot_t *snapshot) {
   if (s.pending) {
     memcpy(s.deferred, snapshot, sizeof(*snapshot));
     s.has_deferred = true;
+    apply_timer_result();
   } else {
     memcpy(s.snapshot, snapshot, sizeof(*snapshot));
     reconcile_selection();
@@ -1261,12 +1517,36 @@ void ui_set_focus(const alfred_focus_snapshot_t *snapshot) {
   ui_unlock();
 }
 void ui_task_completed(const alfred_task_completed_t *ack) {
+  if (!ack)
+    return;
   ui_lock();
-  if (s.pending && !strcmp(s.pending_id, ack->id) &&
+  if (s.pending && !s.reopening && !s.timer_pending &&
+      !strcmp(s.pending_id, ack->id) &&
       !strcmp(s.request_id, ack->request_id)) {
     s.acknowledged = true;
     if (s.page == PAGE_FOCUS && s.hint)
       lv_label_set_text(s.hint, "Nice.");
+  }
+  ui_unlock();
+}
+void ui_task_reopened(const alfred_task_reopened_t *ack) {
+  if (!ack)
+    return;
+  ui_lock();
+  if (s.pending && s.reopening && !strcmp(s.pending_id, ack->id) &&
+      !strcmp(s.request_id, ack->request_id))
+    finish_reopen();
+  ui_unlock();
+}
+void ui_task_timer_updated(const alfred_task_timer_updated_t *ack) {
+  if (!ack)
+    return;
+  ui_lock();
+  if (s.pending && s.timer_pending && s.timer_action == ack->action &&
+      !strcmp(s.pending_id, ack->id) &&
+      !strcmp(s.request_id, ack->request_id)) {
+    s.acknowledged = true;
+    apply_timer_result();
   }
   ui_unlock();
 }

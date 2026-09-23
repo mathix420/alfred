@@ -10,6 +10,11 @@ import {
   type FocusTask,
   type TaskList,
   type TaskCategory,
+  type TaskMutation,
+  type TaskTimerAction,
+  taskTimerAction,
+  MAX_TIMER_SECONDS,
+  mutationConfirmed,
 } from "./types";
 
 export function demoTasks(now = new Date()): TaskList {
@@ -68,7 +73,9 @@ function demoFocus(tasks: FocusTask[]): string | null {
   return (
     ["investor-demo", "walk", "term-sheet", "notary"].find((id) =>
       tasks.some((task) => task.id === id && !task.completed),
-    ) ?? null
+    ) ??
+    tasks.find((task) => !task.completed)?.id ??
+    null
   );
 }
 
@@ -79,7 +86,7 @@ interface SavedState {
   focusId: string | null;
   categories?: TaskCategory[];
   completedIds: string[];
-  requests: [string, string][];
+  requests: [string, string, (TaskMutation | boolean)?][];
 }
 
 export class TaskStore {
@@ -87,7 +94,7 @@ export class TaskStore {
   private queue: Promise<unknown> = Promise.resolve();
   private refreshPending: Promise<FocusSnapshot> | undefined;
   private readonly completedIds = new Set<string>();
-  private readonly requests = new Map<string, string>();
+  private readonly requests = new Map<string, { id: string; action: TaskMutation }>();
   private readonly listeners = new Set<(snapshot: FocusSnapshot) => void>();
 
   constructor(
@@ -125,7 +132,16 @@ export class TaskStore {
         !Array.isArray(saved.requests) ||
         saved.requests.length > 256 ||
         !saved.requests.every(
-          (pair) => Array.isArray(pair) && pair.length === 2 && pair.every(identifier),
+          (pair) =>
+            Array.isArray(pair) &&
+            (pair.length === 2 || pair.length === 3) &&
+            identifier(pair[0]) &&
+            identifier(pair[1]) &&
+            (pair.length === 2 ||
+              typeof pair[2] === "boolean" ||
+              pair[2] === "complete" ||
+              pair[2] === "reopen" ||
+              taskTimerAction(pair[2])),
         )
       )
         throw new Error("invalid");
@@ -134,14 +150,27 @@ export class TaskStore {
         list.tasks = demoTasks().tasks.map((task) => ({
           ...task,
           completed:
-            task.completed ||
-            list.tasks.some((savedTask) => savedTask.id === task.id && savedTask.completed),
+            list.tasks.find((savedTask) => savedTask.id === task.id)?.completed ?? task.completed,
+          ...(list.tasks.find((savedTask) => savedTask.id === task.id)?.timer !== undefined
+            ? { timer: list.tasks.find((savedTask) => savedTask.id === task.id)!.timer }
+            : {}),
+          ...(list.tasks.find((savedTask) => savedTask.id === task.id)?.spentTimeSeconds !==
+          undefined
+            ? {
+                spentTimeSeconds: list.tasks.find((savedTask) => savedTask.id === task.id)!
+                  .spentTimeSeconds,
+              }
+            : {}),
         }));
         list.focusId = demoFocus(list.tasks);
       }
       this.current = { ...this.current, ...list, revision: saved.revision };
       for (const id of saved.completedIds) this.completedIds.add(id);
-      for (const [requestId, taskId] of saved.requests) this.requests.set(requestId, taskId);
+      for (const [requestId, taskId, action = "complete"] of saved.requests)
+        this.requests.set(requestId, {
+          id: taskId,
+          action: typeof action === "boolean" ? (action ? "complete" : "reopen") : action,
+        });
     } catch {
       throw new PocketError(
         "storage_invalid",
@@ -191,50 +220,99 @@ export class TaskStore {
   }
 
   complete(id: string, requestId: string, acknowledge?: () => void): Promise<FocusSnapshot> {
+    return this.mutate(id, requestId, "complete", acknowledge);
+  }
+
+  reopen(id: string, requestId: string, acknowledge?: () => void): Promise<FocusSnapshot> {
+    return this.mutate(id, requestId, "reopen", acknowledge);
+  }
+
+  updateTimer(
+    id: string,
+    requestId: string,
+    action: TaskTimerAction,
+    acknowledge?: () => void,
+  ): Promise<FocusSnapshot> {
+    if (!taskTimerAction(action))
+      return Promise.reject(new PocketError("invalid_request", "Choose start, pause or stop."));
+    return this.mutate(id, requestId, action, acknowledge);
+  }
+
+  private mutate(
+    id: string,
+    requestId: string,
+    action: TaskMutation,
+    acknowledge?: () => void,
+  ): Promise<FocusSnapshot> {
     if (!identifier(id) || !identifier(requestId))
       return Promise.reject(
         new PocketError("invalid_request", "A valid task and request ID are required."),
       );
     return this.serialize(async () => {
       const previous = this.requests.get(requestId);
-      if (previous && previous !== id)
-        throw new PocketError("request_conflict", "That request ID belongs to another task.", 409);
-      if (
-        previous === id ||
-        (!this.adapter?.authoritativeCompletions && this.completedIds.has(id))
-      ) {
+      if (previous && (previous.id !== id || previous.action !== action))
+        throw new PocketError(
+          "request_conflict",
+          "That request ID belongs to another task or action.",
+          409,
+        );
+      if (previous) {
         acknowledge?.();
         return this.snapshot();
       }
       const task = this.current.tasks.find((item) => item.id === id);
       if (!task)
         throw new PocketError("task_missing", "This task has changed. Refresh your list.", 404);
+      if (action === "start" && task.completed)
+        throw new PocketError("task_completed", "Reopen this task before starting its timer.", 409);
+      if ((action === "pause" || (action === "stop" && !task.completed)) && !task.timer)
+        throw new PocketError("timer_missing", "Start this task's timer first.", 409);
       let list: TaskList;
       try {
-        list =
-          this.adapter && !task.completed
-            ? await this.adapter.completeTask(task, requestId)
-            : {
-                tasks: this.current.tasks.map((item) =>
-                  item.id === id ? { ...item, completed: true } : item,
-                ),
-                focusId: null,
-                categories: this.current.categories,
-              };
+        if (this.adapter && taskTimerAction(action)) {
+          if (!this.adapter.updateTimer)
+            throw new PocketError(
+              "timer_unavailable",
+              "The task service does not support timers.",
+              503,
+            );
+          list = await this.adapter.updateTimer(task, action, requestId);
+        } else if (this.adapter) {
+          if (action === "complete") list = await this.adapter.completeTask(task, requestId);
+          else if (this.adapter.reopenTask) list = await this.adapter.reopenTask(task, requestId);
+          else
+            throw new PocketError(
+              "reopen_unavailable",
+              "The task service does not support reopening tasks.",
+              503,
+            );
+        } else {
+          list = {
+            tasks: this.current.tasks.map((item) =>
+              item.id === id ? localMutation(item, action) : item,
+            ),
+            focusId: null,
+            categories: this.current.categories,
+          };
+        }
       } catch (error) {
-        if (this.adapter) this.markOffline();
+        if (this.adapter && !(error instanceof PocketError && error.status === 409))
+          this.markOffline();
         throw error;
       }
       if (!this.adapter) list.focusId = demoFocus(list.tasks);
-      // Keep all previously acknowledged completions across delayed cloud reads.
-      list = this.preserveCompletions(list);
-      if (!list.tasks.some((item) => item.id === id && item.completed)) {
+      list = parseTaskList(list);
+      const confirmed = list.tasks.find((item) => item.id === id);
+      if (!confirmed || !mutationConfirmed(confirmed, action))
         throw new PocketError(
-          "completion_unconfirmed",
-          "The task service has not confirmed completion. Please try again.",
+          "task_change_unconfirmed",
+          "The task service has not confirmed this change. Please try again.",
           502,
         );
-      }
+      const nextCompleted = new Set(this.completedIds);
+      if (confirmed.completed) nextCompleted.add(id);
+      else nextCompleted.delete(id);
+      list = this.preserveCompletions(list, nextCompleted);
       if (!list.focusId) list.focusId = list.tasks.find((item) => !item.completed)?.id ?? null;
       const next: FocusSnapshot = {
         ...this.current,
@@ -243,25 +321,25 @@ export class TaskStore {
         connection: this.adapter ? "online" : "unconfigured",
       };
       const nextRequests = new Map(this.requests);
-      nextRequests.set(requestId, id);
+      nextRequests.set(requestId, { id, action });
       while (nextRequests.size > 256) nextRequests.delete(nextRequests.keys().next().value!);
-      const nextCompleted = new Set(this.completedIds).add(id);
       await this.persist(next, nextCompleted, nextRequests);
       this.current = next;
-      this.completedIds.add(id);
+      this.completedIds.clear();
+      for (const taskId of nextCompleted) this.completedIds.add(taskId);
       this.requests.clear();
-      for (const [request, taskId] of nextRequests) this.requests.set(request, taskId);
+      for (const [request, operation] of nextRequests) this.requests.set(request, operation);
       acknowledge?.();
       this.publish();
       return this.snapshot();
     });
   }
 
-  private preserveCompletions(list: TaskList): TaskList {
+  private preserveCompletions(list: TaskList, completedIds = this.completedIds): TaskList {
     const validated = parseTaskList(list);
     if (this.adapter?.authoritativeCompletions) return validated;
     const tasks = validated.tasks.map((item) =>
-      this.completedIds.has(item.id) ? { ...item, completed: true } : item,
+      completedIds.has(item.id) ? { ...item, completed: true } : item,
     );
     const focusId = tasks.some((item) => item.id === validated.focusId && !item.completed)
       ? validated.focusId
@@ -302,7 +380,11 @@ export class TaskStore {
       const state: SavedState = {
         ...snapshot,
         completedIds: [...completedIds],
-        requests: [...requests],
+        requests: [...requests].map(([requestId, operation]) => [
+          requestId,
+          operation.id,
+          operation.action,
+        ]),
       };
       await Bun.write(temporary, JSON.stringify(state));
       await rename(temporary, this.dataFile);
@@ -314,4 +396,29 @@ export class TaskStore {
       );
     }
   }
+}
+
+function localMutation(task: FocusTask, action: TaskMutation): FocusTask {
+  const timer = task.timer;
+  const seconds = Math.min(
+    MAX_TIMER_SECONDS,
+    (timer?.elapsedSeconds ?? task.spentTimeSeconds ?? 0) +
+      (timer?.startedAt
+        ? Math.max(0, Math.floor((Date.now() - Date.parse(timer.startedAt)) / 1000))
+        : 0),
+  );
+  if (action === "start")
+    return {
+      ...task,
+      timer: timer?.startedAt
+        ? timer
+        : { startedAt: new Date().toISOString(), elapsedSeconds: seconds },
+    };
+  if (action === "pause") return { ...task, timer: { startedAt: null, elapsedSeconds: seconds } };
+  if (action === "reopen") return { ...task, completed: false };
+  return {
+    ...task,
+    completed: true,
+    ...(timer || action === "stop" ? { timer: null, spentTimeSeconds: seconds } : {}),
+  };
 }

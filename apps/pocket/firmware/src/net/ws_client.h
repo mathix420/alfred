@@ -37,6 +37,8 @@ typedef struct {
   // Parsed control-plane messages (one per inbound text frame).
   void (*on_focus)(const alfred_focus_snapshot_t *snapshot, void *user);
   void (*on_task_completed)(const alfred_task_completed_t *ack, void *user);
+  void (*on_task_reopened)(const alfred_task_reopened_t *ack, void *user);
+  void (*on_task_timer_updated)(const alfred_task_timer_updated_t *ack, void *user);
   void (*on_welcome)(const alfred_welcome_t *w, void *user);
   void (*on_state)(alfred_device_state_t state, void *user);
   void (*on_transcript)(const alfred_text_chunk_t *t, void *user);
@@ -81,6 +83,8 @@ esp_err_t ws_client_send_ping(void);
 esp_err_t ws_client_send_refresh(void);
 esp_err_t ws_client_send_cancel(void);
 esp_err_t ws_client_send_complete_task(const char *id, const char *request_id);
+esp_err_t ws_client_send_reopen_task(const char *id, const char *request_id);
+esp_err_t ws_client_send_task_timer(const char *id, const char *request_id, alfred_task_timer_action_t action);
 esp_err_t ws_client_send_telemetry(const alfred_telemetry_t *t);
 
 // -------- outbound audio plane (device → bridge) --------

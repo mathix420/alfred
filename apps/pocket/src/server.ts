@@ -6,7 +6,7 @@ import type { TaskAdapter } from "./types";
 import { TodoMateApiAdapter } from "./todomate";
 import { MatrixVoiceService, PythonMatrixTransport } from "./matrix";
 import { TaskStore } from "./tasks";
-import { identifier, PocketError, publicError } from "./types";
+import { identifier, taskTimerAction, PocketError, publicError } from "./types";
 
 interface Connection {
   authenticated: boolean;
@@ -217,12 +217,27 @@ export async function createPocketServer(
           send(ws, { type: "focus", snapshot: focusSnapshot() });
           return;
         }
-        case "complete_task": {
+        case "complete_task":
+        case "reopen_task": {
           if (!identifier(message.id) || !requestId)
             throw new PocketError("invalid_request", "A valid task and request ID are required.");
           const id = message.id;
-          await store.complete(id, requestId, () =>
-            send(ws, { type: "task_completed", id, requestId }),
+          const completed = message.type === "complete_task";
+          await store[completed ? "complete" : "reopen"](id, requestId, () =>
+            send(ws, { type: completed ? "task_completed" : "task_reopened", id, requestId }),
+          );
+          send(ws, { type: "focus", snapshot: focusSnapshot() });
+          return;
+        }
+        case "task_timer": {
+          if (!identifier(message.id) || !requestId || !taskTimerAction(message.action))
+            throw new PocketError(
+              "invalid_request",
+              "A task, request ID and timer action are required.",
+            );
+          const { id, action } = message;
+          await store.updateTimer(id, requestId, action, () =>
+            send(ws, { type: "task_timer_updated", id, requestId, action }),
           );
           send(ws, { type: "focus", snapshot: focusSnapshot() });
           return;
@@ -380,12 +395,26 @@ export async function createPocketServer(
           if (!job) throw new PocketError("job_missing", "Voice job not found.", 404);
           return json(job);
         }
-        const completion = /^\/api\/tasks\/([A-Za-z0-9_.:-]+)\/complete$/.exec(url.pathname);
+        const completion = /^\/api\/tasks\/([A-Za-z0-9_.:-]+)\/(complete|reopen)$/.exec(
+          url.pathname,
+        );
         if (req.method === "POST" && completion) {
           const body = await bodyObject(req);
           if (!identifier(body.requestId))
             throw new PocketError("invalid_request", "A valid request ID is required.");
-          return json(await store.complete(completion[1]!, body.requestId));
+          return json(
+            await store[completion[2] === "complete" ? "complete" : "reopen"](
+              completion[1]!,
+              body.requestId,
+            ),
+          );
+        }
+        const timer = /^\/api\/tasks\/([A-Za-z0-9_.:-]+)\/timer$/.exec(url.pathname);
+        if (req.method === "POST" && timer) {
+          const body = await bodyObject(req);
+          if (!identifier(body.requestId) || !taskTimerAction(body.action))
+            throw new PocketError("invalid_request", "A request ID and timer action are required.");
+          return json(await store.updateTimer(timer[1]!, body.requestId, body.action));
         }
         if (req.method === "GET" && url.pathname === "/app.js") {
           browserBundle ??= buildBrowser(config.webDirectory).catch((error: unknown) => {

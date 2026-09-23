@@ -25,6 +25,7 @@
 
 #include "audio/audio.h"
 #include "net/protocol.h"
+#include "net/wifi_policy.h"
 #include "net/ws_client.h"
 
 #include "board/board.h"
@@ -38,9 +39,9 @@ static const char *TAG = "main";
 
 // Reported in the hello frame; distinguish the opt-in demo from real devices.
 #if ALFRED_ENABLE_DEMO
-#define ALFRED_FIRMWARE_VERSION "0.3.3-demo"
+#define ALFRED_FIRMWARE_VERSION "0.3.4-demo"
 #else
-#define ALFRED_FIRMWARE_VERSION "0.3.3-production"
+#define ALFRED_FIRMWARE_VERSION "0.3.4-production"
 #endif
 
 // NVS namespace/keys for device config (provisioned over BLE/SoftAP on first
@@ -63,8 +64,7 @@ typedef struct {
   char ws_uri[256];
   char device_token[193];
   char device_id[ALFRED_DEVICE_ID_MAX];
-  char wifi_ssid[33];
-  char wifi_pass[65];
+  alfred_wifi_profile_t wifi[ALFRED_WIFI_PROFILES_MAX];
   char timezone[64]; // POSIX TZ string (e.g. "CET-1CEST,M3.5.0,M10.5.0/3")
   bool provisioned;
 } app_config_t;
@@ -80,6 +80,13 @@ static bool nvs_get_str_into(nvs_handle_t h, const char *key, char *dst,
   return nvs_get_str(h, key, dst, &len) == ESP_OK;
 }
 
+static bool has_wifi_profile(const app_config_t *cfg) {
+  for (size_t i = 0; i < ALFRED_WIFI_PROFILES_MAX; ++i)
+    if (alfred_wifi_profile_valid(cfg->wifi[i].ssid, cfg->wifi[i].password))
+      return true;
+  return false;
+}
+
 // Load device config from NVS. Marks provisioned=false if essentials are
 // missing so app_main can route into BLE/SoftAP provisioning.
 static void load_config(app_config_t *cfg) {
@@ -90,22 +97,42 @@ static void load_config(app_config_t *cfg) {
     return;
   }
   // Read every field independently: one missing key must not hide the rest.
-  bool uri = nvs_get_str_into(h, NVS_KEY_WS_URI, cfg->ws_uri,
-                              sizeof(cfg->ws_uri));
+  bool uri =
+      nvs_get_str_into(h, NVS_KEY_WS_URI, cfg->ws_uri, sizeof(cfg->ws_uri));
   bool id = nvs_get_str_into(h, NVS_KEY_DEVICE_ID, cfg->device_id,
                              sizeof(cfg->device_id));
-  bool ssid = nvs_get_str_into(h, NVS_KEY_WIFI_SSID, cfg->wifi_ssid,
-                               sizeof(cfg->wifi_ssid));
-  bool password = nvs_get_str_into(h, NVS_KEY_WIFI_PASS, cfg->wifi_pass,
-                                   sizeof(cfg->wifi_pass));
+  bool ssid = false, password = false;
+  for (size_t i = 0; i < ALFRED_WIFI_PROFILES_MAX; ++i) {
+    char ssid_key[16], password_key[16];
+    if (i) {
+      snprintf(ssid_key, sizeof(ssid_key), "wifi_ssid_%u", (unsigned)i);
+      snprintf(password_key, sizeof(password_key), "wifi_pass_%u", (unsigned)i);
+    } else {
+      strcpy(ssid_key, NVS_KEY_WIFI_SSID);
+      strcpy(password_key, NVS_KEY_WIFI_PASS);
+    }
+    alfred_wifi_profile_t *profile = &cfg->wifi[i];
+    bool has_ssid =
+        nvs_get_str_into(h, ssid_key, profile->ssid, sizeof(profile->ssid));
+    bool has_password = nvs_get_str_into(h, password_key, profile->password,
+                                         sizeof(profile->password));
+    if (!i) {
+      ssid = has_ssid && profile->ssid[0];
+      password = has_password;
+    }
+    if (!has_ssid || !has_password ||
+        !alfred_wifi_profile_valid(profile->ssid, profile->password))
+      memset(profile, 0, sizeof(*profile));
+  }
   nvs_get_str_into(h, "device_token", cfg->device_token,
                    sizeof(cfg->device_token));
   nvs_get_str_into(h, "timezone", cfg->timezone, sizeof(cfg->timezone));
   nvs_close(h);
-  cfg->provisioned = uri && id && ssid && password && cfg->wifi_ssid[0];
-  ESP_LOGI(TAG, "saved settings: endpoint=%d id=%d wifi=%d password=%d token=%d",
-           uri && cfg->ws_uri[0], id && cfg->device_id[0],
-           ssid && cfg->wifi_ssid[0], password, cfg->device_token[0] != 0);
+  cfg->provisioned = uri && id && has_wifi_profile(cfg);
+  ESP_LOGI(TAG,
+           "saved settings: endpoint=%d id=%d wifi=%d password=%d token=%d",
+           uri && cfg->ws_uri[0], id && cfg->device_id[0], ssid, password,
+           cfg->device_token[0] != 0);
 }
 
 // Trim leading/trailing whitespace (incl. CR/LF) in place; returns trimmed
@@ -121,6 +148,17 @@ static char *trim_ws(char *s) {
   return s;
 }
 
+static bool copy_wifi_field(char *dst, size_t capacity, const char *value) {
+  // Reject overlong values rather than connecting to a silently truncated SSID.
+  size_t length = strlen(value);
+  if (length >= capacity) {
+    memset(dst, 0, capacity);
+    return false;
+  }
+  memcpy(dst, value, length + 1);
+  return true;
+}
+
 // Load WiFi + timezone from the SD card's setup.txt (the app-pixels reference
 // format: `KEY=value` lines). We only read SSID/PASSWORD/TIMEZONE plus optional
 // WS_URI/DEVICE_ID; the file's CLAUDE_KEY/GROQ_KEY belong to the other firmware
@@ -133,6 +171,9 @@ static bool load_config_from_sd(app_config_t *cfg) {
     return false;
   }
   char line[256];
+  bool secondary_ssid[ALFRED_WIFI_PROFILES_MAX] = {0};
+  bool secondary_password[ALFRED_WIFI_PROFILES_MAX] = {0};
+  bool invalid_wifi[ALFRED_WIFI_PROFILES_MAX] = {0};
   while (fgets(line, sizeof(line), f) != NULL) {
     char *eq = strchr(line, '=');
     if (eq == NULL)
@@ -141,9 +182,11 @@ static bool load_config_from_sd(app_config_t *cfg) {
     char *key = trim_ws(line);
     char *val = trim_ws(eq + 1);
     if (strcasecmp(key, "SSID") == 0) {
-      strlcpy(cfg->wifi_ssid, val, sizeof(cfg->wifi_ssid));
+      invalid_wifi[0] |=
+          !copy_wifi_field(cfg->wifi[0].ssid, sizeof(cfg->wifi[0].ssid), val);
     } else if (strcasecmp(key, "PASSWORD") == 0) {
-      strlcpy(cfg->wifi_pass, val, sizeof(cfg->wifi_pass));
+      invalid_wifi[0] |= !copy_wifi_field(cfg->wifi[0].password,
+                                          sizeof(cfg->wifi[0].password), val);
     } else if (strcasecmp(key, "TIMEZONE") == 0) {
       strlcpy(cfg->timezone, val, sizeof(cfg->timezone));
     } else if (strcasecmp(key, "WS_URI") == 0) {
@@ -152,10 +195,37 @@ static bool load_config_from_sd(app_config_t *cfg) {
       strlcpy(cfg->device_token, val, sizeof(cfg->device_token));
     } else if (strcasecmp(key, "DEVICE_ID") == 0) {
       strlcpy(cfg->device_id, val, sizeof(cfg->device_id));
+    } else {
+      for (size_t i = 1; i < ALFRED_WIFI_PROFILES_MAX; ++i) {
+        char ssid_key[16], password_key[16];
+        snprintf(ssid_key, sizeof(ssid_key), "SSID_%u", (unsigned)i);
+        snprintf(password_key, sizeof(password_key), "PASSWORD_%u",
+                 (unsigned)i);
+        bool is_ssid = strcasecmp(key, ssid_key) == 0;
+        bool is_password = strcasecmp(key, password_key) == 0;
+        if (!is_ssid && !is_password)
+          continue;
+        if (!secondary_ssid[i] && !secondary_password[i])
+          memset(&cfg->wifi[i], 0, sizeof(cfg->wifi[i]));
+        if (is_ssid) {
+          secondary_ssid[i] = true;
+          invalid_wifi[i] |= !copy_wifi_field(cfg->wifi[i].ssid,
+                                              sizeof(cfg->wifi[i].ssid), val);
+        } else {
+          secondary_password[i] = true;
+          invalid_wifi[i] |= !copy_wifi_field(
+              cfg->wifi[i].password, sizeof(cfg->wifi[i].password), val);
+        }
+        break;
+      }
     }
   }
   fclose(f);
-  cfg->provisioned = cfg->wifi_ssid[0] != '\0';
+  for (size_t i = 0; i < ALFRED_WIFI_PROFILES_MAX; ++i)
+    if (invalid_wifi[i] || (i && secondary_ssid[i] != secondary_password[i]) ||
+        !alfred_wifi_profile_valid(cfg->wifi[i].ssid, cfg->wifi[i].password))
+      memset(&cfg->wifi[i], 0, sizeof(cfg->wifi[i]));
+  cfg->provisioned = has_wifi_profile(cfg);
   // Never log the SSID/password values — just whether they were found.
   ESP_LOGI(TAG, "SD setup.txt: WiFi creds %s, timezone %s",
            cfg->provisioned ? "found" : "MISSING",
@@ -190,47 +260,126 @@ static void ensure_device_id(app_config_t *cfg) {
 }
 
 // -----------------------------------------------------------------------------
-// WiFi (station) — minimal connect using NVS credentials.
+// Wi-Fi station. The default event loop owns profile selection and retries;
+// the timer only posts an event so Wi-Fi state never races a timer callback.
 // -----------------------------------------------------------------------------
+
+ESP_EVENT_DEFINE_BASE(POCKET_WIFI_EVENT);
+enum { WIFI_RETRY_EVENT };
+static alfred_wifi_profiles_t s_wifi_profiles;
+static alfred_wifi_policy_t s_wifi_policy;
+static esp_timer_handle_t s_wifi_retry_timer;
+static bool s_wifi_started, s_wifi_retry_pending;
+static int64_t s_wifi_retry_due;
+
+static void wifi_retry_timer(void *arg) {
+  (void)arg;
+  if (esp_event_post(POCKET_WIFI_EVENT, WIFI_RETRY_EVENT, NULL, 0, 0) !=
+      ESP_OK) {
+    // A temporarily full event queue must not permanently stop reconnection.
+    // Reposting is harmless if GOT_IP has already cancelled the retry.
+    esp_timer_start_once(s_wifi_retry_timer, 100000);
+  }
+}
+
+static void wifi_attempt_failed(void) {
+  if (!s_wifi_started || s_wifi_retry_pending)
+    return;
+  uint32_t delay_ms = alfred_wifi_policy_failed(&s_wifi_policy);
+  s_wifi_retry_pending = true;
+  s_wifi_retry_due = esp_timer_get_time() + (int64_t)delay_ms * 1000;
+  esp_timer_stop(s_wifi_retry_timer);
+  esp_err_t err =
+      esp_timer_start_once(s_wifi_retry_timer, (uint64_t)delay_ms * 1000);
+  ESP_LOGI(TAG, "wifi retry: profile %u/%u in %lu ms",
+           (unsigned)s_wifi_policy.current + 1, (unsigned)s_wifi_profiles.count,
+           (unsigned long)delay_ms);
+  if (err != ESP_OK)
+    ESP_LOGE(TAG, "wifi retry timer: %s", esp_err_to_name(err));
+}
+
+static void wifi_attempt(void) {
+  const alfred_wifi_profile_t *profile =
+      &s_wifi_profiles.items[s_wifi_policy.current];
+  wifi_config_t config = {0};
+  // IDF accepts all 32 SSID bytes and all 64 PSK bytes without a terminator.
+  memcpy(config.sta.ssid, profile->ssid, strlen(profile->ssid));
+  memcpy(config.sta.password, profile->password, strlen(profile->password));
+  esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &config);
+  if (err == ESP_OK)
+    err = esp_wifi_connect();
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "wifi connection attempt failed: %s", esp_err_to_name(err));
+    wifi_attempt_failed();
+  }
+}
 
 static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id,
                                void *data) {
   (void)arg;
   if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-    esp_wifi_connect();
+    s_wifi_started = true;
+    s_wifi_retry_pending = false;
+    wifi_attempt();
+  } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_STOP) {
+    s_wifi_started = false;
+    s_wifi_retry_pending = false;
+    s_wifi_policy.connected = false;
+    esp_timer_stop(s_wifi_retry_timer);
   } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
     wifi_event_sta_disconnected_t *d = (wifi_event_sta_disconnected_t *)data;
-    ESP_LOGW(TAG, "wifi disconnected (reason %d); retrying",
-             d ? d->reason : -1);
-    esp_wifi_connect(); // ws_client backoff handles the bridge side
+    ESP_LOGW(TAG, "wifi disconnected (reason %d)", d ? d->reason : -1);
+    wifi_attempt_failed();
   } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
-    ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
-    // Compare this subnet to the bridge's (ws_uri) — they must match (or
-    // route).
-    ESP_LOGI(TAG,
-             "wifi got IP " IPSTR
-             " (bridge ws_uri must be reachable from here)",
-             IP2STR(&e->ip_info.ip));
+    alfred_wifi_policy_connected(&s_wifi_policy);
+    s_wifi_retry_pending = false;
+    esp_timer_stop(s_wifi_retry_timer);
+    ESP_LOGI(TAG, "wifi connected (profile %u/%u)",
+             (unsigned)s_wifi_policy.current + 1,
+             (unsigned)s_wifi_profiles.count);
+  } else if (base == POCKET_WIFI_EVENT && id == WIFI_RETRY_EVENT) {
+    if (!s_wifi_started || !s_wifi_retry_pending || s_wifi_policy.connected)
+      return; // Ignore an expired event from a cancelled/replaced retry.
+    int64_t remaining = s_wifi_retry_due - esp_timer_get_time();
+    if (remaining > 0) {
+      // A queue-full repost may arrive before a newer retry's deadline. Keep
+      // its wakeup instead of consuming the only pending timer event.
+      esp_timer_stop(s_wifi_retry_timer);
+      esp_timer_start_once(s_wifi_retry_timer, (uint64_t)remaining);
+      return;
+    }
+    s_wifi_retry_pending = false;
+    wifi_attempt();
   }
 }
 
 static esp_err_t wifi_connect(const app_config_t *cfg) {
+  memset(&s_wifi_profiles, 0, sizeof(s_wifi_profiles));
+  for (size_t i = 0; i < ALFRED_WIFI_PROFILES_MAX; ++i)
+    alfred_wifi_profiles_add(&s_wifi_profiles, cfg->wifi[i].ssid,
+                             cfg->wifi[i].password);
+  if (!alfred_wifi_policy_init(&s_wifi_policy, s_wifi_profiles.count))
+    return ESP_ERR_INVALID_ARG;
   ESP_ERROR_CHECK(esp_netif_init());
   esp_netif_create_default_wifi_sta();
 
+  // Avoid the driver's verbose connection log exposing an SSID.
+  esp_log_level_set("wifi", ESP_LOG_WARN);
   wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
   ESP_ERROR_CHECK(esp_wifi_init(&init));
+  // Switching profiles must never replace the saved primary network in NVS.
+  ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+  const esp_timer_create_args_t timer = {.callback = wifi_retry_timer,
+                                         .name = "wifi_retry"};
+  ESP_ERROR_CHECK(esp_timer_create(&timer, &s_wifi_retry_timer));
   ESP_ERROR_CHECK(esp_event_handler_instance_register(
       WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL, NULL));
   ESP_ERROR_CHECK(esp_event_handler_instance_register(
       IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL, NULL));
-
-  wifi_config_t wc = {0};
-  strncpy((char *)wc.sta.ssid, cfg->wifi_ssid, sizeof(wc.sta.ssid) - 1);
-  strncpy((char *)wc.sta.password, cfg->wifi_pass, sizeof(wc.sta.password) - 1);
+  ESP_ERROR_CHECK(esp_event_handler_instance_register(
+      POCKET_WIFI_EVENT, WIFI_RETRY_EVENT, wifi_event_handler, NULL, NULL));
 
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-  ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
   ESP_ERROR_CHECK(esp_wifi_start());
   return ESP_OK;
 }
@@ -336,6 +485,25 @@ static void command_task(void *arg) {
           show_problem("send_failed", "Could not save this task.",
                        command.request_id);
         break;
+      case UI_REOPEN:
+        if (ws_client_send_reopen_task(command.id, command.request_id) !=
+            ESP_OK)
+          show_problem("send_failed", "Could not reopen this task.",
+                       command.request_id);
+        break;
+      case UI_TIMER_START:
+      case UI_TIMER_PAUSE:
+      case UI_TIMER_STOP: {
+        alfred_task_timer_action_t action =
+            command.action == UI_TIMER_START   ? ALFRED_TIMER_START
+            : command.action == UI_TIMER_PAUSE ? ALFRED_TIMER_PAUSE
+                                               : ALFRED_TIMER_STOP;
+        if (ws_client_send_task_timer(command.id, command.request_id, action) !=
+            ESP_OK)
+          show_problem("send_failed", "Could not update this timer.",
+                       command.request_id);
+        break;
+      }
       case UI_REFRESH:
         if (ws_client_is_connected())
           ws_client_send_refresh();
@@ -404,6 +572,15 @@ static void on_focus(const alfred_focus_snapshot_t *snapshot, void *user) {
 static void on_task_completed(const alfred_task_completed_t *ack, void *user) {
   (void)user;
   ui_task_completed(ack);
+}
+static void on_task_reopened(const alfred_task_reopened_t *ack, void *user) {
+  (void)user;
+  ui_task_reopened(ack);
+}
+static void on_task_timer_updated(const alfred_task_timer_updated_t *ack,
+                                  void *user) {
+  (void)user;
+  ui_task_timer_updated(ack);
 }
 static void on_state(alfred_device_state_t state, void *user) {
   (void)user;
@@ -484,8 +661,8 @@ void app_main(void) {
     setenv("TZ", s_config.timezone, 1);
     tzset();
   }
-  bool bridge_configured = s_config.provisioned && s_config.ws_uri[0] &&
-                           s_config.device_token[0];
+  bool bridge_configured =
+      s_config.provisioned && s_config.ws_uri[0] && s_config.device_token[0];
   ui_set_configured(bridge_configured);
   ESP_LOGI(TAG, "connection configuration: wifi=%d backend=%d demo=%d",
            s_config.provisioned, bridge_configured, ALFRED_ENABLE_DEMO);
@@ -504,6 +681,8 @@ void app_main(void) {
                  .on_welcome = on_welcome,
                  .on_focus = on_focus,
                  .on_task_completed = on_task_completed,
+                 .on_task_reopened = on_task_reopened,
+                 .on_task_timer_updated = on_task_timer_updated,
                  .on_state = on_state,
                  // Voice is outbound only: no transcript/reply/TTS callbacks.
                  .on_error = on_error}};

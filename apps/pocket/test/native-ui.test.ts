@@ -14,7 +14,7 @@ const compiler = Bun.which("cc") ?? Bun.which("clang") ?? Bun.which("gcc");
 const cmake = Bun.which("cmake");
 const native = lvgl && compiler && cmake ? describe : describe.skip;
 
-native("native LVGL manual focus (requires LVGL source, CMake and a C compiler)", () => {
+native("native LVGL task controls (requires LVGL source, CMake and a C compiler)", () => {
   let directory = "";
   let binary = "";
 
@@ -46,6 +46,7 @@ native("native LVGL manual focus (requires LVGL source, CMake and a C compiler)"
       "esp_lcd_panel_io.h",
       "esp_lcd_panel_ops.h",
       "esp_log.h",
+      "esp_random.h",
       "esp_timer.h",
       "freertos/FreeRTOS.h",
       "freertos/semphr.h",
@@ -102,7 +103,10 @@ native("native LVGL manual focus (requires LVGL source, CMake and a C compiler)"
     if (directory) await rm(directory, { recursive: true, force: true });
   });
 
-  it("retains the selected task through updates and restart until completion or replacement", async () => {
-    expect(await run([binary])).toContain("Manual focus survives");
+  it("preserves focus and validates reopen and timer controls through real pointer events", async () => {
+    const output = await run([binary]);
+    expect(output).toContain("Manual focus survives");
+    expect(output).toContain("Completed inspection persists");
+    expect(output).toContain("Timer dock isolates horizontal gestures");
   });
 });

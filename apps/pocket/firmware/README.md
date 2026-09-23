@@ -17,6 +17,14 @@ Matrix. The device does not transcribe, display replies, or play spoken replies.
   replaced by another selection, or removed from TodoMate. The task ID is saved
   on the device, so refreshes, list reordering, reconnects, and restarts keep
   your choice. A failed completion keeps the selected task ready to retry.
+- Select a completed task in Today to inspect its checked flower in Focus.
+  Tap it to reopen the task; it becomes unchecked after the backend confirms,
+  and remains your selected focus.
+- Swipe left from the right edge of Focus to open the translucent timer dock;
+  swipe right to close it. Start/resume, Pause, and Stop control TodoMate's timer.
+  Elapsed time appears beside the flower while the timer is enabled. **Stop
+  saves elapsed time and completes the task.** Completing with the flower also
+  saves a running or paused timer. Reopen a checked task before starting again.
 - Scroll within Today or Memo. Tap its title/handle to return, or reverse the
   opening gesture from the header. Content swipes return only when starting at
   the appropriate boundary: Today at the top, Memo at the bottom.
@@ -79,14 +87,37 @@ the WebSocket upgrade. Matrix credentials stay on the server.
 The SD settings are read at boot and are not written back to NVS. Existing NVS
 settings take precedence. BLE provisioning is not implemented.
 
-| NVS key        | Meaning                               |
-| -------------- | ------------------------------------- |
-| `wifi_ssid`    | Wi-Fi SSID                            |
-| `wifi_pass`    | Wi-Fi password                        |
-| `ws_uri`       | Backend WebSocket URL including `/ws` |
-| `device_id`    | Stable device identifier              |
-| `device_token` | Shared backend device token           |
-| `timezone`     | Optional POSIX timezone string        |
+The primary network stays in `wifi_ssid` / `wifi_pass`. Up to five secondary
+profiles can be supplied as paired NVS strings `wifi_ssid_1` / `wifi_pass_1`
+through `wifi_ssid_5` / `wifi_pass_5`. Missing slots are skipped; identical
+SSID/password pairs are tried once. For SD configuration, the equivalent
+optional pairs are `SSID_1` / `PASSWORD_1` through `SSID_5` / `PASSWORD_5`.
+
+At startup the primary is tried first. A failed attempt is retried once on the
+same profile, then the device moves through the remaining profiles in order.
+Retries are two seconds apart, with a 30-second pause after a complete failed
+cycle. Once connected, the device keeps that network; after a connection drops,
+it retries that profile before trying others. Backend unavailability alone does
+not switch Wi-Fi networks. Changing profiles does not overwrite saved settings.
+
+SSIDs can contain up to 32 bytes. Passwords accept 8–63-byte WPA passphrases or a
+64-character hexadecimal PSK. An explicitly empty password selects an open
+network. Invalid or incomplete secondary profiles are skipped. This ESP32-S3
+supports 2.4 GHz Wi-Fi; a network name does not determine which radio bands its
+access point provides. Credentials belong in private provisioning data or the
+SD file, never in source code or build flags. Connection logs show profile
+numbers and error codes without SSIDs or passwords.
+
+| NVS key                       | Meaning                               |
+| ----------------------------- | ------------------------------------- |
+| `wifi_ssid`                   | Wi-Fi SSID                            |
+| `wifi_pass`                   | Wi-Fi password                        |
+| `wifi_ssid_1` … `wifi_ssid_5` | Optional secondary SSIDs, in order    |
+| `wifi_pass_1` … `wifi_pass_5` | Corresponding secondary passwords     |
+| `ws_uri`                      | Backend WebSocket URL including `/ws` |
+| `device_id`                   | Stable device identifier              |
+| `device_token`                | Shared backend device token           |
+| `timezone`                    | Optional POSIX timezone string        |
 
 ## Protocol and source
 
@@ -98,9 +129,12 @@ After each recording, the USB log reports captured sample count, capture time,
 and PCM duration. For a recording of several seconds, PCM duration should be
 close to the time held, with about 16,000 samples per second.
 
-The device sends `hello`, `complete_task`, `refresh`, `ptt_down`, binary recording
-chunks, `ptt_up`, and `cancel`. The backend supplies `hello`, `focus`,
-`task_completed`, `state`, and `error` messages. The voice sequence is
+The device sends `hello`, `complete_task`, `reopen_task`, `task_timer`, `refresh`,
+`ptt_down`, binary recording chunks, `ptt_up`, and `cancel`. The backend supplies
+`welcome`, `focus`, `task_completed`, `task_reopened`, `task_timer_updated`,
+`state`, and `error` messages. Mutation acknowledgements match the task, action,
+and request ID; timer controls also wait for an authoritative focus snapshot.
+The voice sequence is
 `listening` → `thinking` (displayed as Sending) → `sent` → `idle`.
 
 The C decoder retains legacy message definitions for compatibility, but the app

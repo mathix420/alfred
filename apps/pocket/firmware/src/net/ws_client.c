@@ -93,6 +93,14 @@ static void dispatch_text(const char *json) {
     if (s_cb.on_task_completed)
       s_cb.on_task_completed(&msg->as.task_completed, u);
     break;
+  case ALFRED_SRV_TASK_REOPENED:
+    if (s_cb.on_task_reopened)
+      s_cb.on_task_reopened(&msg->as.task_reopened, u);
+    break;
+  case ALFRED_SRV_TASK_TIMER_UPDATED:
+    if (s_cb.on_task_timer_updated)
+      s_cb.on_task_timer_updated(&msg->as.task_timer_updated, u);
+    break;
   case ALFRED_SRV_WELCOME:
     if (msg->as.welcome.protocol != ALFRED_PROTOCOL_VERSION) {
       ESP_LOGW(TAG, "protocol mismatch: bridge=%d device=%d",
@@ -324,6 +332,13 @@ esp_err_t ws_client_send_cancel(void) {
 }
 esp_err_t ws_client_send_complete_task(const char *id, const char *request_id) {
   return send_text_owned(alfred_encode_complete_task(id, request_id));
+}
+esp_err_t ws_client_send_reopen_task(const char *id, const char *request_id) {
+  return send_text_owned(alfred_encode_reopen_task(id, request_id));
+}
+esp_err_t ws_client_send_task_timer(const char *id, const char *request_id,
+                                    alfred_task_timer_action_t action) {
+  return send_text_owned(alfred_encode_task_timer(id, request_id, action));
 }
 
 esp_err_t ws_client_send_telemetry(const alfred_telemetry_t *t) {

@@ -11,6 +11,10 @@
 
 typedef enum {
   UI_COMPLETE,
+  UI_REOPEN,
+  UI_TIMER_START,
+  UI_TIMER_PAUSE,
+  UI_TIMER_STOP,
   UI_REFRESH,
   UI_CANCEL,
   UI_PTT_DOWN,
@@ -26,6 +30,8 @@ void ui_unlock(void);
 void ui_set_state(alfred_device_state_t state);
 void ui_set_focus(const alfred_focus_snapshot_t *snapshot);
 void ui_task_completed(const alfred_task_completed_t *ack);
+void ui_task_reopened(const alfred_task_reopened_t *ack);
+void ui_task_timer_updated(const alfred_task_timer_updated_t *ack);
 void ui_set_connection(bool connected);
 void ui_set_configured(bool configured);
 void ui_set_battery(int percent, bool charging);

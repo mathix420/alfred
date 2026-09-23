@@ -87,6 +87,7 @@ typedef struct {
 } alfred_focus_category_t;
 
 typedef enum { TASK_WORK, TASK_HEALTH, TASK_PERSONAL } alfred_task_category_t;
+typedef enum { ALFRED_TIMER_START, ALFRED_TIMER_PAUSE, ALFRED_TIMER_STOP } alfred_task_timer_action_t;
 typedef struct {
   char id[ALFRED_TASK_ID_MAX];
   char title[ALFRED_TASK_TITLE_MAX];
@@ -96,6 +97,11 @@ typedef struct {
   // Legacy fallback for snapshots without a matching catalog entry.
   alfred_task_category_t category;
   bool completed;
+  bool has_timer;
+  int64_t timer_started_at_ms; // 0 while paused
+  uint32_t timer_elapsed_seconds;
+  bool has_spent_time;
+  uint32_t spent_time_seconds;
 } alfred_focus_task_t;
 typedef struct {
   alfred_focus_task_t tasks[ALFRED_TASKS_MAX];
@@ -113,6 +119,12 @@ typedef struct {
   char id[ALFRED_TASK_ID_MAX];
   char request_id[ALFRED_REQUEST_ID_MAX];
 } alfred_task_completed_t;
+typedef alfred_task_completed_t alfred_task_reopened_t;
+typedef struct {
+  char id[ALFRED_TASK_ID_MAX];
+  char request_id[ALFRED_REQUEST_ID_MAX];
+  alfred_task_timer_action_t action;
+} alfred_task_timer_updated_t;
 
 // -----------------------------------------------------------------------------
 // device -> bridge messages
@@ -155,6 +167,8 @@ typedef enum {
   ALFRED_SRV_WELCOME = 0,
   ALFRED_SRV_FOCUS,
   ALFRED_SRV_TASK_COMPLETED,
+  ALFRED_SRV_TASK_REOPENED,
+  ALFRED_SRV_TASK_TIMER_UPDATED,
   ALFRED_SRV_STATE,
   ALFRED_SRV_TRANSCRIPT,
   ALFRED_SRV_REPLY,
@@ -217,6 +231,8 @@ typedef struct {
     alfred_welcome_t welcome;
     alfred_focus_snapshot_t focus;
     alfred_task_completed_t task_completed;
+    alfred_task_reopened_t task_reopened;
+    alfred_task_timer_updated_t task_timer_updated;
     alfred_device_state_t state;     // ALFRED_SRV_STATE
     alfred_text_chunk_t transcript;  // ALFRED_SRV_TRANSCRIPT
     alfred_text_chunk_t reply;       // ALFRED_SRV_REPLY
@@ -256,6 +272,9 @@ char *alfred_encode_ping(void);
 char *alfred_encode_refresh(void);
 char *alfred_encode_cancel(void);
 char *alfred_encode_complete_task(const char *id, const char *request_id);
+char *alfred_encode_reopen_task(const char *id, const char *request_id);
+char *alfred_encode_task_timer(const char *id, const char *request_id, alfred_task_timer_action_t action);
+const char *alfred_task_timer_action_str(alfred_task_timer_action_t action);
 // telemetry { type[, battery][, charging][, rssi] }.
 char *alfred_encode_telemetry(const alfred_telemetry_t *t);
 

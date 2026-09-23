@@ -7,6 +7,53 @@ export interface FocusTask {
   memo: string;
   dueAt: string | null;
   completed: boolean;
+  timer?: TaskTimer | null;
+  spentTimeSeconds?: number | null;
+}
+
+export interface TaskTimer {
+  startedAt: string | null;
+  elapsedSeconds: number;
+}
+export type TaskTimerAction = "start" | "pause" | "stop";
+export type TaskMutation = "complete" | "reopen" | TaskTimerAction;
+export const MAX_TIMER_SECONDS = 72000;
+export function taskTimerAction(value: unknown): value is TaskTimerAction {
+  return value === "start" || value === "pause" || value === "stop";
+}
+
+export function parseSpentSeconds(value: unknown): number | null {
+  if (value === null) return null;
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 0 ||
+    value > MAX_TIMER_SECONDS
+  )
+    throw invalidTasks();
+  return value;
+}
+
+export function parseTaskTimer(value: unknown): TaskTimer | null {
+  if (value === null) return null;
+  if (!value || typeof value !== "object") throw invalidTasks();
+  const timer = value as Record<string, unknown>;
+  const elapsedSeconds = parseSpentSeconds(timer.elapsedSeconds);
+  if (
+    elapsedSeconds === null ||
+    !(
+      timer.startedAt === null ||
+      (typeof timer.startedAt === "string" &&
+        /^\d{4}-\d{2}-\d{2}T/.test(timer.startedAt) &&
+        Number.isFinite(Date.parse(timer.startedAt)) &&
+        Date.parse(timer.startedAt) > 0)
+    )
+  )
+    throw invalidTasks();
+  return {
+    startedAt: timer.startedAt === null ? null : new Date(timer.startedAt as string).toISOString(),
+    elapsedSeconds,
+  };
 }
 
 export interface TaskCategory {
@@ -32,6 +79,13 @@ export interface TaskAdapter {
   readonly authoritativeCompletions?: boolean;
   readTasks(signal?: AbortSignal): Promise<TaskList>;
   completeTask(task: FocusTask, requestId: string, signal?: AbortSignal): Promise<TaskList>;
+  reopenTask?(task: FocusTask, requestId: string, signal?: AbortSignal): Promise<TaskList>;
+  updateTimer?(
+    task: FocusTask,
+    action: TaskTimerAction,
+    requestId: string,
+    signal?: AbortSignal,
+  ): Promise<TaskList>;
 }
 
 export interface FocusSnapshot extends TaskList {
@@ -119,6 +173,10 @@ export function parseTaskList(input: unknown): TaskList {
       memo: task.memo,
       dueAt: task.dueAt as string | null,
       completed: task.completed,
+      ...(task.timer !== undefined ? { timer: parseTaskTimer(task.timer) } : {}),
+      ...(task.spentTimeSeconds !== undefined
+        ? { spentTimeSeconds: parseSpentSeconds(task.spentTimeSeconds) }
+        : {}),
     };
   });
   if (
@@ -147,4 +205,19 @@ export function fitDeviceText(text: string): string {
   let end = 3068; // Reserve three bytes for the ellipsis.
   while ((bytes[end]! & 0xc0) === 0x80) end--;
   return `${new TextDecoder().decode(bytes.subarray(0, end))}…`;
+}
+
+export function mutationConfirmed(task: FocusTask, action: TaskMutation): boolean {
+  switch (action) {
+    case "complete":
+      return task.completed;
+    case "reopen":
+      return !task.completed;
+    case "start":
+      return !task.completed && Boolean(task.timer?.startedAt);
+    case "pause":
+      return !task.completed && Boolean(task.timer) && task.timer!.startedAt === null;
+    case "stop":
+      return task.completed && task.timer === null;
+  }
 }

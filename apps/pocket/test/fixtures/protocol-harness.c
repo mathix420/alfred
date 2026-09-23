@@ -10,7 +10,17 @@ static void text(cJSON *object, const char *key, const char *value) {
   cJSON_AddStringToObject(object, key, value);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+  if (argc == 2) {
+    char *json = !strcmp(argv[1], "reopen")
+      ? alfred_encode_reopen_task("contract-task", "contract-request")
+      : alfred_encode_task_timer("contract-task", "contract-request",
+          !strcmp(argv[1], "start") ? ALFRED_TIMER_START : !strcmp(argv[1], "pause") ? ALFRED_TIMER_PAUSE : ALFRED_TIMER_STOP);
+    if (!json) return 2;
+    puts(json);
+    free(json);
+    return 0;
+  }
   char *input = calloc(131073, 1);
   alfred_server_msg_t *message = calloc(1, sizeof(*message));
   if (!input || !message) return 2;
@@ -56,12 +66,19 @@ int main(void) {
           text(item, "category", task->category == TASK_WORK ? "work" : task->category == TASK_HEALTH ? "health" : "personal");
           if (task->category_id[0]) text(item, "categoryId", task->category_id);
           cJSON_AddBoolToObject(item, "completed", task->completed);
+          if (task->has_timer) {
+            cJSON *timer = cJSON_AddObjectToObject(item, "timer");
+            cJSON_AddNumberToObject(timer, "startedAtMs", task->timer_started_at_ms);
+            cJSON_AddNumberToObject(timer, "elapsedSeconds", task->timer_elapsed_seconds);
+          }
+          if (task->has_spent_time) cJSON_AddNumberToObject(item, "spentTimeSeconds", task->spent_time_seconds);
           cJSON_AddItemToArray(tasks, item);
         }
         break;
       }
       case ALFRED_SRV_TASK_COMPLETED:
-        text(output, "type", "task_completed");
+      case ALFRED_SRV_TASK_REOPENED:
+        text(output, "type", message->type == ALFRED_SRV_TASK_COMPLETED ? "task_completed" : "task_reopened");
         text(output, "id", message->as.task_completed.id);
         text(output, "requestId", message->as.task_completed.request_id);
         break;
@@ -70,6 +87,12 @@ int main(void) {
         text(output, "codec", alfred_audio_encoding_str(message->as.tts_begin.encoding));
         cJSON_AddNumberToObject(output, "sampleRate", message->as.tts_begin.sample_rate);
         cJSON_AddNumberToObject(output, "channels", message->as.tts_begin.channels);
+        break;
+      case ALFRED_SRV_TASK_TIMER_UPDATED:
+        text(output, "type", "task_timer_updated");
+        text(output, "id", message->as.task_timer_updated.id);
+        text(output, "requestId", message->as.task_timer_updated.request_id);
+        text(output, "action", alfred_task_timer_action_str(message->as.task_timer_updated.action));
         break;
       case ALFRED_SRV_TRANSCRIPT:
       case ALFRED_SRV_REPLY: {
