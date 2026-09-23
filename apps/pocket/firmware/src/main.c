@@ -38,9 +38,9 @@ static const char *TAG = "main";
 
 // Reported in the hello frame; distinguish the opt-in demo from real devices.
 #if ALFRED_ENABLE_DEMO
-#define ALFRED_FIRMWARE_VERSION "0.3.2-demo"
+#define ALFRED_FIRMWARE_VERSION "0.3.3-demo"
 #else
-#define ALFRED_FIRMWARE_VERSION "0.3.2-production"
+#define ALFRED_FIRMWARE_VERSION "0.3.3-production"
 #endif
 
 // NVS namespace/keys for device config (provisioned over BLE/SoftAP on first

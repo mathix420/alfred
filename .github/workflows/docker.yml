@@ -21,6 +21,7 @@ jobs:
     timeout-minutes: 25
     env:
       CJSON_SOURCE_DIR: ${{ github.workspace }}/.ci/cjson
+      LVGL_SOURCE_DIR: ${{ github.workspace }}/.ci/lvgl
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,6 +36,14 @@ jobs:
           path: .ci/cjson
           persist-credentials: false
 
+      - name: Check out LVGL for native UI tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: lvgl/lvgl
+          ref: 85aa60d18b3d5e5588d7b247abf90198f07c8a63 # v9.5.0
+          path: .ci/lvgl
+          persist-credentials: false
+
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -47,10 +56,12 @@ jobs:
         # Each workspace uses scripts/tsc7 with --checkers 4.
         run: bun run typecheck
 
-      - name: Run tests, including Bun and firmware wire contract
+      - name: Run tests, including Bun, firmware wire contract, and native UI
         run: |
           test -f "$CJSON_SOURCE_DIR/cJSON.c"
+          test -f "$LVGL_SOURCE_DIR/CMakeLists.txt"
           command -v cc
+          command -v cmake
           bun test
 
       - name: Check deployment helpers

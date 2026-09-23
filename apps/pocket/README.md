@@ -32,6 +32,10 @@ scroll. Tap their title or top handle to return. Browser page drags begin outsid
 the scrollable content so ordinary reading gestures keep native browser momentum.
 Hold the side button or Space to talk; Escape cancels the current interaction.
 The native device uses BOOT for push-to-talk and PWR short press for Today/back.
+Choose an unfinished task in Today to keep it in Focus. Your choice survives
+refreshes, reordered tasks, reconnects, and restarts until you complete it,
+choose another task, or TodoMate removes it. The device and browser remember
+their own selection locally; the server's suggested task resumes afterward.
 
 ## Add Alfred to an existing Docker stack
 

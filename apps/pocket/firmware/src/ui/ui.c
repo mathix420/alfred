@@ -12,9 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#if ALFRED_ENABLE_DEMO
 #include "nvs.h"
-#endif
 #include "ui/theme.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +27,11 @@ static const char *TAG = "pocket_ui";
 #define PAGE_SLIDE_MS 220
 #define PAGE_HEIGHT 448
 #define HEADER_END_Y 92
+#if ALFRED_ENABLE_DEMO
+#define FOCUS_NVS_KEY "demo_focus"
+#else
+#define FOCUS_NVS_KEY "focus_task"
+#endif
 
 typedef enum {
   PAGE_FOCUS,
@@ -51,8 +54,9 @@ typedef struct {
   bool gesture_moved, transition, ignore_touch, press_at_top, press_at_bottom;
   page_t page, rendered_page;
   int slide_direction;
-  int selected, battery_pct;
+  int battery_pct;
   bool charging;
+  char selected_id[ALFRED_TASK_ID_MAX];
   char pending_id[ALFRED_TASK_ID_MAX], request_id[ALFRED_REQUEST_ID_MAX];
   char note[128];
   uint32_t request_counter, pending_since, complete_since, touch_since,
@@ -125,10 +129,47 @@ static int find_task(const char *id) {
       return (int)i;
   return -1;
 }
+static void load_selection(void) {
+  nvs_handle_t h;
+  if (nvs_open("pocket", NVS_READONLY, &h) != ESP_OK)
+    return;
+  size_t length = sizeof(s.selected_id);
+  if (nvs_get_str(h, FOCUS_NVS_KEY, s.selected_id, &length) != ESP_OK)
+    s.selected_id[0] = 0;
+  nvs_close(h);
+}
+static void set_selection(const char *id) {
+  if (!id)
+    id = "";
+  if (!strcmp(s.selected_id, id))
+    return;
+  copy(s.selected_id, sizeof(s.selected_id), id);
+  nvs_handle_t h;
+  esp_err_t err = nvs_open("pocket", NVS_READWRITE, &h);
+  if (err == ESP_OK) {
+    err = id[0] ? nvs_set_str(h, FOCUS_NVS_KEY, s.selected_id)
+                : nvs_erase_key(h, FOCUS_NVS_KEY);
+    if (err == ESP_ERR_NVS_NOT_FOUND)
+      err = ESP_OK;
+    if (err == ESP_OK)
+      err = nvs_commit(h);
+    nvs_close(h);
+  }
+  if (err != ESP_OK)
+    ESP_LOGW(TAG, "Could not persist focus selection: %s", esp_err_to_name(err));
+}
+static void reconcile_selection(void) {
+  // An offline/cache-only frame is not evidence that the chosen task was removed.
+  if (!s.selected_id[0] || !s.snapshot->online)
+    return;
+  int idx = find_task(s.selected_id);
+  if (idx < 0 || s.snapshot->tasks[idx].completed)
+    set_selection(NULL);
+}
 static int active_index(void) {
-  if (s.selected >= 0 && s.selected < (int)s.snapshot->count &&
-      !s.snapshot->tasks[s.selected].completed)
-    return s.selected;
+  int selected = find_task(s.selected_id);
+  if (selected >= 0 && !s.snapshot->tasks[selected].completed)
+    return selected;
   int idx = find_task(s.snapshot->focus_id);
   if (idx >= 0 && !s.snapshot->tasks[idx].completed)
     return idx;
@@ -518,16 +559,20 @@ static void cancel_pending(const char *note) {
     memcpy(s.snapshot, s.deferred, sizeof(*s.snapshot));
     s.has_deferred = false;
   }
+  reconcile_selection();
   s.rebuild = true;
 }
 static void finish_complete(void) {
-  int idx = find_task(s.pending_id);
-  if (idx >= 0)
-    s.snapshot->tasks[idx].completed = true;
   if (s.has_deferred) {
     memcpy(s.snapshot, s.deferred, sizeof(*s.snapshot));
     s.has_deferred = false;
   }
+  int idx = find_task(s.pending_id);
+  if (idx >= 0)
+    s.snapshot->tasks[idx].completed = true;
+  if (!strcmp(s.selected_id, s.pending_id))
+    set_selection(NULL);
+  reconcile_selection();
 #if ALFRED_ENABLE_DEMO
   if (s.demo && !s.connected)
     save_demo();
@@ -537,7 +582,6 @@ static void finish_complete(void) {
   s.acknowledged = false;
   s.pending_id[0] = 0;
   s.request_id[0] = 0;
-  s.selected = -1;
   s.note[0] = 0;
   show_page(PAGE_FOCUS);
 }
@@ -605,10 +649,17 @@ static void build_focus(void) {
     set_hint("Hold to talk", POCKET_DIM, true);
 }
 static void row_clicked(lv_event_t *e) {
-  if (s.gesture_moved)
+  if (s.gesture_moved || s.transition || s.pending)
     return;
-  s.selected = (int)(intptr_t)lv_event_get_user_data(e);
+  const char *id = lv_event_get_user_data(e);
+  int idx = find_task(id);
+  if (idx < 0 || s.snapshot->tasks[idx].completed)
+    return;
+  set_selection(id);
   show_page(PAGE_FOCUS);
+}
+static void row_deleted(lv_event_t *e) {
+  lv_free(lv_event_get_user_data(e));
 }
 static bool task_in_group(const alfred_focus_task_t *task,
                            const alfred_focus_category_t *category,
@@ -652,8 +703,13 @@ static int today_group(lv_obj_t *list, int y,
     lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
     if (active)
       label(row, 283, 22, 36, "now", &inter_14, task_color(task));
-    lv_obj_add_event_cb(row, row_clicked, LV_EVENT_SHORT_CLICKED,
-                        (void *)(intptr_t)i);
+    // The snapshot may reorder before the next redraw; retain the rendered ID.
+    char *id = lv_malloc(strlen(task->id) + 1);
+    if (id) {
+      strcpy(id, task->id);
+      lv_obj_add_event_cb(row, row_clicked, LV_EVENT_SHORT_CLICKED, id);
+      lv_obj_add_event_cb(row, row_deleted, LV_EVENT_DELETE, id);
+    }
     y += 62;
   }
   return y + 10;
@@ -1063,7 +1119,7 @@ static void render_task(void *arg) {
 }
 esp_err_t ui_init(void) {
   memset(&s, 0, sizeof(s));
-  s.selected = -1;
+  load_selection();
   s.battery_pct = -1;
   s.snapshot = calloc(1, sizeof(*s.snapshot));
   s.deferred = calloc(1, sizeof(*s.deferred));
@@ -1195,7 +1251,7 @@ void ui_set_focus(const alfred_focus_snapshot_t *snapshot) {
     s.has_deferred = true;
   } else {
     memcpy(s.snapshot, snapshot, sizeof(*snapshot));
-    s.selected = -1;
+    reconcile_selection();
     if (s.page == PAGE_OFFLINE && snapshot->online)
       show_page(PAGE_FOCUS);
     else

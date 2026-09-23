@@ -13,6 +13,10 @@ Matrix. The device does not transcribe, display replies, or play spoken replies.
   before the flower/check animation reveals the next task. Completed task
   flowers keep their category color in Focus and Today.
 - Swipe up from Focus for Today; swipe down for Memo.
+- Select an unfinished task in Today to keep it in Focus until completed,
+  replaced by another selection, or removed from TodoMate. The task ID is saved
+  on the device, so refreshes, list reordering, reconnects, and restarts keep
+  your choice. A failed completion keeps the selected task ready to retry.
 - Scroll within Today or Memo. Tap its title/handle to return, or reverse the
   opening gesture from the header. Content swipes return only when starting at
   the appropriate boundary: Today at the top, Memo at the bottom.

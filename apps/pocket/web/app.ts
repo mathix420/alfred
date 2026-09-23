@@ -52,6 +52,7 @@ function tick(cls = "checkmark"): string {
   return `<svg class="${cls}" viewBox="0 0 58 58" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 30 9 9 20-21"/></svg>`;
 }
 let snapshot: Snapshot | null = null;
+let selectedFocusId: string | null = null;
 let view: View = "focus";
 let socket: WebSocket | null = null;
 let online = false;
@@ -121,7 +122,28 @@ function getBrowserId(): string {
   }
 }
 function currentTask(): Task | undefined {
-  return snapshot?.tasks.find((task) => task.id === snapshot?.focusId && !task.completed);
+  return (
+    snapshot?.tasks.find((task) => task.id === selectedFocusId && !task.completed) ??
+    snapshot?.tasks.find((task) => task.id === snapshot?.focusId && !task.completed)
+  );
+}
+function readSelectedFocus(mode: Snapshot["mode"]): string | null {
+  try {
+    return localStorage.getItem(`alfred-selected-focus-${mode}`);
+  } catch {
+    return null;
+  }
+}
+function selectFocus(id: string | null): void {
+  selectedFocusId = id;
+  try {
+    if (!snapshot) return;
+    const key = `alfred-selected-focus-${snapshot.mode}`;
+    if (id) localStorage.setItem(key, id);
+    else localStorage.removeItem(key);
+  } catch {
+    // Keep the selection for this page when browser storage is unavailable.
+  }
 }
 function send(message: object): boolean {
   if (socket?.readyState !== WebSocket.OPEN) return false;
@@ -198,11 +220,12 @@ function focusView(): string {
 function todayView(): string {
   if (!snapshot) return offlineView();
   const groups = snapshot.categories ?? legacyCategories;
+  const focusId = currentTask()?.id;
   return `<div class="page list-page"><button class="grabber top" data-back aria-label="Return to focus"></button>${status()}<div class="list-heading"><button class="back-title" data-back aria-label="Today, return to focus">Today</button><div class="count">${flower()}${snapshot.tasks.filter((t) => t.completed).length}/${snapshot.tasks.length}</div></div><div class="scroll-area" data-scroll>${groups
     .map((group) => {
       const tasks = snapshot!.tasks.filter((t) => (t.categoryId ?? t.category) === group.id);
       if (!tasks.length) return "";
-      return `<div class="task-section" ${categoryAttributes(group)}>${category(group)}${tasks.map((task) => `<button class="task-row ${task.id === snapshot?.focusId ? "current" : ""}" data-task="${escape(task.id)}" aria-label="${task.completed ? "Completed: " : "Open memo: "}${escape(task.title)}"><span class="row-check ${task.completed ? "done" : ""}">${flower()}${task.completed ? tick("row-tick") : ""}</span><span class="row-content"><span class="row-label">${escape(task.title)}</span>${task.dueAt && task.id !== snapshot?.focusId ? `<span class="row-due">${icon("clock")}${escape(dueLabel(task, true))}</span>` : ""}</span>${task.id === snapshot?.focusId ? '<span class="now-tag">now</span>' : ""}</button>`).join("")}</div>`;
+      return `<div class="task-section" ${categoryAttributes(group)}>${category(group)}${tasks.map((task) => `<button class="task-row ${task.id === focusId ? "current" : ""}" data-task="${escape(task.id)}" aria-label="${task.completed ? "Completed: " : "Focus on: "}${escape(task.title)}"><span class="row-check ${task.completed ? "done" : ""}">${flower()}${task.completed ? tick("row-tick") : ""}</span><span class="row-content"><span class="row-label">${escape(task.title)}</span>${task.dueAt && task.id !== focusId ? `<span class="row-due">${icon("clock")}${escape(dueLabel(task, true))}</span>` : ""}</span>${task.id === focusId ? '<span class="now-tag">now</span>' : ""}</button>`).join("")}</div>`;
     })
     .join("")}</div></div>`;
 }
@@ -281,7 +304,14 @@ function adopt(next: Snapshot): void {
   if (!next || !Array.isArray(next.tasks) || typeof next.revision !== "number") return;
   if (!acceptNextSnapshot && snapshot && next.revision < snapshot.revision) return;
   acceptNextSnapshot = false;
+  if (snapshot?.mode !== next.mode) selectedFocusId = readSelectedFocus(next.mode);
   snapshot = next;
+  if (
+    selectedFocusId &&
+    (next.connection === "online" || next.mode === "demo") &&
+    !next.tasks.some((task) => task.id === selectedFocusId && !task.completed)
+  )
+    selectFocus(null);
   if (!completion) render();
 }
 async function refresh(): Promise<void> {
@@ -325,6 +355,7 @@ function connect(): void {
         break;
       case "task_completed":
         if (!completion || completion.requestId !== message.requestId) break;
+        if (selectedFocusId === completion.task.id) selectFocus(null);
         clearTimeout(completionTimeout);
         completion.phase = "celebrating";
         announcement.textContent = `Completed: ${completion.task.title}`;
@@ -716,8 +747,12 @@ screen.addEventListener("click", (event) => {
   } else if (target.closest("[data-voice],[data-noop]")) return;
   else if (view === "thinking" || view === "sent") cancel();
   else {
-    const task = target.closest<HTMLElement>("[data-task]");
-    if (task?.dataset.task) navigate("memo", task.dataset.task);
+    const taskId = target.closest<HTMLElement>("[data-task]")?.dataset.task;
+    const task = snapshot?.tasks.find((item) => item.id === taskId);
+    if (task && !task.completed) {
+      selectFocus(task.id);
+      navigate("focus");
+    } else if (task) navigate("memo", task.id);
     else if (view === "focus" && target.closest("[data-complete]")) complete();
   }
 });
